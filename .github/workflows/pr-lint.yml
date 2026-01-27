@@ -1,0 +1,110 @@
+name: Display Full Context
+
+on:
+  workflow_dispatch:  # Manual trigger
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  display-context:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Display GitHub Context
+      run: |
+        echo "=== GITHUB CONTEXT ==="
+        echo '${{ toJson(github) }}'
+    
+    - name: Display Job Context
+      run: |
+        echo -e "\n=== JOB CONTEXT ==="
+        echo '${{ toJson(job) }}'
+    
+    - name: Display Steps Context
+      run: |
+        echo -e "\n=== STEPS CONTEXT ==="
+        echo '${{ toJson(steps) }}'
+    
+    - name: Display Runner Context
+      run: |
+        echo -e "\n=== RUNNER CONTEXT ==="
+        echo '${{ toJson(runner) }}'
+    
+    - name: Display Secrets Context
+      run: |
+        echo -e "\n=== SECRETS CONTEXT (names only) ==="
+        echo '${{ toJson(secrets) }}'
+    
+    - name: Display Strategy Context
+      run: |
+        echo -e "\n=== STRATEGY CONTEXT ==="
+        echo '${{ toJson(strategy) }}'
+    
+    - name: Display Matrix Context
+      run: |
+        echo -e "\n=== MATRIX CONTEXT ==="
+        echo '${{ toJson(matrix) }}'
+    
+    - name: Display Needs Context
+      run: |
+        echo -e "\n=== NEEDS CONTEXT ==="
+        echo '${{ toJson(needs) }}'
+    
+    - name: Display Inputs Context
+      run: |
+        echo -e "\n=== INPUTS CONTEXT ==="
+        echo '${{ toJson(inputs) }}'
+    
+    - name: Display Full Context in JSON File
+      run: |
+        echo -e "\n=== ALL CONTEXTS (saved to file) ==="
+        CONTEXTS=$(cat << EOF
+        {
+          "github": ${{ toJson(github) }},
+          "job": ${{ toJson(job) }},
+          "steps": ${{ toJson(steps) }},
+          "runner": ${{ toJson(runner) }},
+          "secrets": ${{ toJson(secrets) }},
+          "strategy": ${{ toJson(strategy) }},
+          "matrix": ${{ toJson(matrix) }},
+          "needs": ${{ toJson(needs) }},
+          "inputs": ${{ toJson(inputs) }},
+          "env": ${{ toJson(env) }}
+        }
+        EOF
+        )
+        
+        echo "$CONTEXTS" > contexts.json
+        echo "Contexts saved to contexts.json"
+        echo "Total size: $(wc -c < contexts.json) bytes"
+        
+        # Display some key info
+        echo -e "\n=== KEY INFORMATION ==="
+        echo "Repository: ${{ github.repository }}"
+        echo "Workflow: ${{ github.workflow }}"
+        echo "Run ID: ${{ github.run_id }}"
+        echo "Run Number: ${{ github.run_number }}"
+        echo "SHA: ${{ github.sha }}"
+        echo "Ref: ${{ github.ref }}"
+        echo "Event Name: ${{ github.event_name }}"
+        echo "Actor: ${{ github.actor }}"
+        echo "Runner OS: ${{ runner.os }}"
+        echo "Runner Temp: ${{ runner.temp }}"
+        echo "Runner Workspace: ${{ runner.workspace }}"
+    
+    - name: Upload Contexts File
+      uses: actions/upload-artifact@v4
+      with:
+        name: github-contexts
+        path: contexts.json
+        
+    - name: Display Event Payload
+      if: github.event_name != 'workflow_dispatch'
+      run: |
+        echo -e "\n=== EVENT PAYLOAD ==="
+        echo '${{ toJson(github.event) }}'
