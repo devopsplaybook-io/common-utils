@@ -48,8 +48,12 @@ jobs:
         if: steps.check_pr.outputs.skip == 'false'
         run: |
           set -e
+          # Update root package
+          echo "Updating dependencies in root"
+          npx npm-check-updates -u
+          npm install
+          # Update sub-service packages
           SERVICES='${{ inputs.npm_services }}'
-          HAS_CHANGES=false
           for FOLDER in $(echo "${SERVICES}" | jq -r '.[]'); do
             echo "Updating dependencies in ${FOLDER}"
             cd "${FOLDER}"
@@ -62,16 +66,13 @@ jobs:
           fi
 
       - name: Bump root package.json patch version
-        if: steps.check_pr.outputs.skip == 'false'
+        if: steps.check_pr.outputs.skip == 'false' && env.HAS_CHANGES == 'true'
         run: |
           set -e
           CURRENT_VERSION=$(jq -r '.version' package.json)
           NEW_VERSION=$(echo "${CURRENT_VERSION}" | awk -F. '{print $1"."$2"."$3+1}')
           jq --arg v "${NEW_VERSION}" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
           echo "Bumped root package.json version: ${CURRENT_VERSION} -> ${NEW_VERSION}"
-          if [ -n "$(git status --porcelain)" ]; then
-            echo "HAS_CHANGES=true" >> $GITHUB_ENV
-          fi
 
       - name: Create Pull Request
         if: steps.check_pr.outputs.skip == 'false' && env.HAS_CHANGES == 'true'
