@@ -1,0 +1,67 @@
+name: "Reusable: NPM Upgrade"
+
+on:
+  workflow_call:
+    inputs:
+      npm_services:
+        description: "JSON array of sub-folders containing NPM services to update"
+        required: true
+        type: string
+      pr_branch:
+        description: "Branch name for the upgrade PR"
+        required: false
+        type: string
+        default: "automated/npm-upgrade"
+
+jobs:
+  npm-upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check for existing PR
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          EXISTING_PR=$(gh pr list --head "${{ inputs.pr_branch }}" --state open --json number --jq 'length')
+          if [ "${EXISTING_PR}" -gt 0 ]; then
+            echo "PR already exists, skipping"
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update NPM dependencies
+        if: steps.check_pr.outputs.skip == 'false'
+        run: |
+          set -e
+          SERVICES='${{ inputs.npm_services }}'
+          HAS_CHANGES=false
+          for FOLDER in $(echo "${SERVICES}" | jq -r '.[]'); do
+            echo "Updating dependencies in ${FOLDER}"
+            cd "${FOLDER}"
+            npx npm-check-updates -u
+            npm install
+            cd "${GITHUB_WORKSPACE}"
+          done
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "HAS_CHANGES=true" >> $GITHUB_ENV
+          fi
+
+      - name: Create Pull Request
+        if: steps.check_pr.outputs.skip == 'false' && env.HAS_CHANGES == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${{ inputs.pr_branch }}"
+          git add -A
+          git commit -m "chore: update NPM dependencies"
+          git push origin "${{ inputs.pr_branch }}"
+          gh pr create \
+            --title "chore: update NPM dependencies" \
+            --body "Automated NPM dependency update" \
+            --head "${{ inputs.pr_branch }}" \
+            --base main
