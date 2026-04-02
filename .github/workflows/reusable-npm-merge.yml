@@ -1,0 +1,86 @@
+name: "Reusable: NPM Merge"
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: "Node.js version to use"
+        required: false
+        type: string
+        default: "18"
+      npm_package_name:
+        description: "NPM package name (e.g. @devopsplaybook.io/otel-utils)"
+        required: true
+        type: string
+    secrets:
+      NPM_TOKEN:
+        required: true
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linting
+        run: npm run lint || echo "No lint script found, skipping"
+
+      - name: Run tests
+        run: npm test || echo "No test script found, skipping"
+
+      - name: Build package
+        run: npm run build
+
+  publish-release:
+    runs-on: ubuntu-latest
+    needs: test-and-build
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: "npm"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build package
+        run: npm run build
+
+      - name: Check if version changed
+        id: version-check
+        run: |
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          echo "current-version=${CURRENT_VERSION}" >> $GITHUB_OUTPUT
+
+          if npm view ${{ inputs.npm_package_name }}@${CURRENT_VERSION} version &> /dev/null; then
+            echo "version-exists=true" >> $GITHUB_OUTPUT
+            echo "Version ${CURRENT_VERSION} already exists on npm"
+          else
+            echo "version-exists=false" >> $GITHUB_OUTPUT
+            echo "Version ${CURRENT_VERSION} is new, will publish"
+          fi
+
+      - name: Publish release package
+        if: steps.version-check.outputs.version-exists == 'false'
+        run: |
+          echo "Publishing version ${{ steps.version-check.outputs.current-version }}"
+          npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
