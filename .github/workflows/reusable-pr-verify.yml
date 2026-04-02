@@ -17,8 +17,6 @@ on:
 jobs:
   docker-build:
     runs-on: ubuntu-latest
-    needs: [npm-verify]
-    if: ${{ always() && (needs.npm-verify.result == 'success' || needs.npm-verify.result == 'skipped') }}
     steps:
       - uses: actions/checkout@v6
 
