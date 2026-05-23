@@ -51,7 +51,9 @@ jobs:
           REPORT_KEY="${REPORT_KEY}_coverage"
 
           if [ -d coverage ]; then
-            zip -r "${{ runner.temp }}/coverage.zip" coverage/
+            # Zip coverage contents at root level so the jest processor
+            # finds coverage-final.json / clover.xml directly
+            (cd coverage && zip -r "${{ runner.temp }}/coverage.zip" .)
 
             META=$(jq -n \
               --arg key "$REPORT_KEY" \
