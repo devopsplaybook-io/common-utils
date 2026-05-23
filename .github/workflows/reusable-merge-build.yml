@@ -25,6 +25,8 @@ on:
         required: true
       QUALITY_DASHBOARD_TOKEN:
         required: false
+      QUALITY_DASHBOARD_URL:
+        required: true
 
 jobs:
   node-build:
@@ -61,7 +63,7 @@ jobs:
       - name: Zip coverage and upload to Quality Dashboard
         if: always()
         env:
-          QUALITY_DASHBOARD_URL: ${{ vars.QUALITY_DASHBOARD_URL || 'https://quality.didierhoarau.cloud' }}
+          QUALITY_DASHBOARD_URL: ${{ secrets.QUALITY_DASHBOARD_URL }}
           QUALITY_DASHBOARD_TOKEN: ${{ secrets.QUALITY_DASHBOARD_TOKEN }}
         run: |
           APP_NAME="${{ matrix.app }}"
