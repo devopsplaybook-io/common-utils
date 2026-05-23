@@ -8,6 +8,16 @@ on:
         required: false
         type: string
         default: "linux/arm64/v8,linux/amd64"
+      node_app_directories:
+        description: "JSON array of Node.js app directories to build, lint, and test"
+        required: false
+        type: string
+        default: ""
+      node_version:
+        description: "Node.js version to use"
+        required: false
+        type: string
+        default: "22"
     secrets:
       DOCKER_HUB_USERNAME:
         required: true
@@ -15,6 +25,37 @@ on:
         required: true
 
 jobs:
+  node-build:
+    if: inputs.node_app_directories != ''
+    strategy:
+      matrix:
+        app: ${{ fromJSON(inputs.node_app_directories) }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: "npm"
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+
   docker-build:
     runs-on: ubuntu-latest
     steps:
