@@ -33,10 +33,10 @@ jobs:
         run: npm ci
 
       - name: Run linting
-        run: npm run lint || echo "No lint script found, skipping"
+        run: npm run lint
 
       - name: Run tests
-        run: npm test || echo "No test script found, skipping"
+        run: npm test
 
       - name: Build package
         run: npm run build
