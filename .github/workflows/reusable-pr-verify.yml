@@ -23,6 +23,8 @@ on:
         required: true
       DOCKER_HUB_ACCESS_TOKEN:
         required: true
+      QUALITY_DASHBOARD_TOKEN:
+        required: false
 
 jobs:
   node-build:
@@ -55,6 +57,45 @@ jobs:
 
       - name: Test
         run: npm run test
+
+      - name: Zip coverage and upload to Quality Dashboard
+        if: always()
+        env:
+          QUALITY_DASHBOARD_URL: ${{ vars.QUALITY_DASHBOARD_URL || 'https://quality.didierhoarau.cloud' }}
+          QUALITY_DASHBOARD_TOKEN: ${{ secrets.QUALITY_DASHBOARD_TOKEN }}
+        run: |
+          APP_NAME="${{ matrix.app }}"
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          REPORT_KEY="$(echo "$APP_NAME" | sed 's/[^a-zA-Z0-9._:\-\/]/_/g')_coverage"
+
+          if [ -d coverage ]; then
+            zip -r "${{ runner.temp }}/coverage.zip" coverage/
+
+            META=$(jq -n \
+              --arg key "$REPORT_KEY" \
+              --arg pkg "$PACKAGE_NAME" \
+              '{
+                key: $key,
+                displayName: "Coverage: \($pkg)",
+                processor: "jest"
+              }')
+
+            echo "Uploading coverage: $REPORT_KEY"
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X POST "$QUALITY_DASHBOARD_URL/api/reports/" \
+              -H "x-upload-token: $QUALITY_DASHBOARD_TOKEN" \
+              -F "meta=$META" \
+              -F "file=@${{ runner.temp }}/coverage.zip" \
+              --max-time 30)
+
+            if [ "$HTTP_CODE" = "201" ]; then
+              echo "\u2713 Coverage uploaded ($HTTP_CODE)"
+            else
+              echo "\u26a0 Upload returned HTTP $HTTP_CODE"
+            fi
+          else
+            echo "No coverage/ directory found, skipping upload"
+          fi
 
   docker-build:
     runs-on: ubuntu-latest
