@@ -45,13 +45,19 @@ export class PostgresSchemaDbUtils {
   private schemaPool: Pool | null = null;
   private runtimePool: Pool | null = null;
   private readonly schemaName: string;
-  private readonly moduleLogger: ModuleLogger;
+  private _moduleLogger: ModuleLogger | null = null;
 
   constructor(schemaName: string) {
     this.schemaName = schemaName;
-    this.moduleLogger = standardLogger.createModuleLogger(
-      `PostgresSchemaDbUtils[${schemaName}]`,
-    );
+  }
+
+  private get moduleLogger(): ModuleLogger {
+    if (!this._moduleLogger) {
+      this._moduleLogger = standardLogger.createModuleLogger(
+        `PostgresSchemaDbUtils[${this.schemaName}]`,
+      );
+    }
+    return this._moduleLogger;
   }
 
   /**
@@ -93,10 +99,7 @@ export class PostgresSchemaDbUtils {
       span,
       `CREATE SCHEMA IF NOT EXISTS ${this.schemaName};`,
     );
-    await this.execSQLForSchema(
-      span,
-      `SET search_path TO ${this.schemaName};`,
-    );
+    await this.execSQLForSchema(span, `SET search_path TO ${this.schemaName};`);
 
     // Run init SQL files
     await this.execSQLFileForSchema(span, `${sqlDir}/init-0000.sql`);
@@ -108,9 +111,7 @@ export class PostgresSchemaDbUtils {
         span,
         "SELECT MAX(value) as version FROM metadata WHERE type='db_version'",
       );
-      if (
-        (dbVersionQuery[0] as Record<string, unknown>).version
-      ) {
+      if ((dbVersionQuery[0] as Record<string, unknown>).version) {
         dbVersionApplied = Number(
           (dbVersionQuery[0] as Record<string, unknown>).version,
         );
@@ -223,10 +224,7 @@ export class PostgresSchemaDbUtils {
     filename: string,
     useSchemaPool = false,
   ): Promise<void> {
-    const span = tracer.startSpan(
-      "PostgresSchemaDbUtilsExecSQLFile",
-      context,
-    );
+    const span = tracer.startSpan("PostgresSchemaDbUtilsExecSQLFile", context);
     const sql = (await fs.readFile(filename)).toString();
     const pool = useSchemaPool ? this.schemaPool : this.runtimePool;
 
@@ -306,10 +304,7 @@ export class PostgresSchemaDbUtils {
     callback: (client: any) => Promise<void>,
     useSchemaPool = false,
   ): Promise<void> {
-    const span = tracer.startSpan(
-      "PostgresSchemaDbUtilsTransaction",
-      context,
-    );
+    const span = tracer.startSpan("PostgresSchemaDbUtilsTransaction", context);
     const pool = useSchemaPool ? this.schemaPool : this.runtimePool;
 
     if (!pool) {

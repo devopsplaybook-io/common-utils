@@ -1,6 +1,6 @@
 {
   "name": "@devopsplaybook.io/common-utils",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Shared utility modules for devopsplaybook.io projects (DB, Config, OTel context, system helpers)",
   "keywords": [
     "Open Telemetry",
