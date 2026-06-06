@@ -18,7 +18,7 @@ on:
       QUALITY_DASHBOARD_TOKEN:
         required: false
       QUALITY_DASHBOARD_URL:
-        required: true
+        required: false
 
 jobs:
   test-and-build:
@@ -53,6 +53,10 @@ jobs:
           REPORT_KEY="${REPORT_KEY}_coverage"
 
           if [ -d coverage ]; then
+            if [ -z "$QUALITY_DASHBOARD_URL" ] || [ -z "$QUALITY_DASHBOARD_TOKEN" ]; then
+              echo "Quality Dashboard URL or token not set, skipping upload"
+              exit 0
+            fi
             # Zip coverage contents at root level so the jest processor
             # finds coverage-final.json / clover.xml directly
             (cd coverage && zip -r "${{ runner.temp }}/coverage.zip" .)
