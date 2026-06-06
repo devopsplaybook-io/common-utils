@@ -169,6 +169,59 @@ Pool defaults: `max: 20`, `idleTimeoutMillis: 30000`, `connectionTimeoutMillis: 
 
 ---
 
+#### `PostgresSchemaDbUtils` -- Multi-Schema PostgreSQL Access
+
+Class-based PostgreSQL utility that manages per-schema connection pools (used during migrations) and an optional shared runtime pool (used for application queries). Ideal for multi-schema setups where each module owns its own schema.
+
+```ts
+import { PostgresSchemaDbUtils } from "@devopsplaybook.io/common-utils";
+
+// Create one instance per schema
+const AuthDb = new PostgresSchemaDbUtils("AUTH");
+const DictionaryDb = new PostgresSchemaDbUtils("DICTIONARY");
+
+// Initialize OTel (once, shared across all instances)
+AuthDb.initOTel(tracer, logger);
+
+// Init schema pool (creates schema + runs migrations)
+await AuthDb.initSchema(span, config, path.resolve(__dirname, "../sql/auth"));
+await DictionaryDb.initSchema(span, config, path.resolve(__dirname, "../sql/dictionary"));
+
+// Init shared runtime pool (call on any instance)
+AuthDb.initRuntimePool(config);
+
+// Query using the schema-specific pool
+const users = await AuthDb.querySQL(span, "SELECT * FROM users WHERE id = $1", [userId]);
+
+// Or use the runtime pool for non-migration queries
+const rows = await AuthDb.querySQL(span, "SELECT ...", [], false);
+
+// Transactions
+await AuthDb.transaction(span, async (client) => {
+  await client.query("INSERT INTO ...", [...]);
+  await client.query("UPDATE ...", [...]);
+});
+
+// Cleanup
+await AuthDb.closeAll();
+```
+
+| Method                                              | Description                                         |
+| --------------------------------------------------- | --------------------------------------------------- |
+| `new PostgresSchemaDbUtils(schemaName)`             | Create instance for a specific schema               |
+| `initOTel(tracer, logger)`                          | Inject OTel instances (shared across all instances) |
+| `initSchema(context, config, sqlDir)`               | Create schema pool and run migrations               |
+| `initRuntimePool(config)`                           | Create shared runtime pool                          |
+| `execSQL(context, sql, params?, useSchemaPool?)`    | Execute write, returns `Promise<number>`            |
+| `execSQLFile(context, filename, useSchemaPool?)`    | Execute an entire SQL file                          |
+| `querySQL(context, sql, params?, useSchemaPool?)`   | Execute read, returns `Promise<any[]>`              |
+| `transaction(context, callback, useSchemaPool?)`    | Run callback inside a transaction                   |
+| `closeAll()`                                        | Close all pools managed by this instance            |
+
+`useSchemaPool` (default `true`) selects between the schema-specific pool (migrations) and the shared runtime pool (application queries).
+
+---
+
 #### `DbUtils` -- Unified Database Facade
 
 Dispatches to SQLite or Postgres based on `config.DATABASE_TYPE`. Write SQL using SQLite-style `?` placeholders; they are automatically converted to `$1, $2, ...` for Postgres.
