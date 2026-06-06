@@ -203,8 +203,8 @@ export abstract class ConfigBase implements ConfigCommonInterface {
           `Configuration Value: ${field}: ******************** (from ${from})`,
         );
       } else {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         log(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           `Configuration Value: ${field}: ${(this as any)[field]} (from ${from})`,
         );
       }
