@@ -206,17 +206,17 @@ await AuthDb.transaction(span, async (client) => {
 await AuthDb.closeAll();
 ```
 
-| Method                                              | Description                                         |
-| --------------------------------------------------- | --------------------------------------------------- |
-| `new PostgresSchemaDbUtils(schemaName)`             | Create instance for a specific schema               |
-| `initOTel(tracer, logger)`                          | Inject OTel instances (shared across all instances) |
-| `initSchema(context, config, sqlDir)`               | Create schema pool and run migrations               |
-| `initRuntimePool(config)`                           | Create shared runtime pool                          |
-| `execSQL(context, sql, params?, useSchemaPool?)`    | Execute write, returns `Promise<number>`            |
-| `execSQLFile(context, filename, useSchemaPool?)`    | Execute an entire SQL file                          |
-| `querySQL(context, sql, params?, useSchemaPool?)`   | Execute read, returns `Promise<any[]>`              |
-| `transaction(context, callback, useSchemaPool?)`    | Run callback inside a transaction                   |
-| `closeAll()`                                        | Close all pools managed by this instance            |
+| Method                                            | Description                                         |
+| ------------------------------------------------- | --------------------------------------------------- |
+| `new PostgresSchemaDbUtils(schemaName)`           | Create instance for a specific schema               |
+| `initOTel(tracer, logger)`                        | Inject OTel instances (shared across all instances) |
+| `initSchema(context, config, sqlDir)`             | Create schema pool and run migrations               |
+| `initRuntimePool(config)`                         | Create shared runtime pool                          |
+| `execSQL(context, sql, params?, useSchemaPool?)`  | Execute write, returns `Promise<number>`            |
+| `execSQLFile(context, filename, useSchemaPool?)`  | Execute an entire SQL file                          |
+| `querySQL(context, sql, params?, useSchemaPool?)` | Execute read, returns `Promise<any[]>`              |
+| `transaction(context, callback, useSchemaPool?)`  | Run callback inside a transaction                   |
+| `closeAll()`                                      | Close all pools managed by this instance            |
 
 `useSchemaPool` (default `true`) selects between the schema-specific pool (migrations) and the shared runtime pool (application queries).
 
