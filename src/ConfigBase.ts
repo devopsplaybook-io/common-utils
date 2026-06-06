@@ -54,6 +54,48 @@ export interface ConfigCommonInterface
 }
 
 /**
+ * Coerce a string value read from an environment variable to match the
+ * type of the default value (number → parseFloat, boolean → "true"/"1",
+ * array → JSON.parse, etc.).  When the default is already a string or
+ * there is no default, the original string is returned as-is.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function coerceValue(value: string, defaultValue: any): any {
+  if (defaultValue === undefined || defaultValue === null) {
+    return value;
+  }
+
+  switch (typeof defaultValue) {
+    case "number": {
+      const parsed = Number(value);
+      return Number.isNaN(parsed) ? value : parsed;
+    }
+    case "boolean": {
+      return value === "true" || value === "1" || value === "yes";
+    }
+    case "object": {
+      if (Array.isArray(defaultValue)) {
+        try {
+          return JSON.parse(value);
+        } catch {
+          return value;
+        }
+      }
+      if (defaultValue !== null) {
+        try {
+          return JSON.parse(value);
+        } catch {
+          return value;
+        }
+      }
+      return value;
+    }
+    default:
+      return value;
+  }
+}
+
+/**
  * Abstract base class for project configuration.
  *
  * Implements the three-layer override strategy used across all
@@ -110,8 +152,12 @@ export abstract class ConfigBase implements ConfigCommonInterface {
    * should process.  Common / DB / OTel fields are pre-registered.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private _fields: { field: string; sensitive: boolean; envAliases: string[]; defaultValue: any }[] =
-    [];
+  private _fields: {
+    field: string;
+    sensitive: boolean;
+    envAliases: string[];
+    defaultValue: any;
+  }[] = [];
 
   /**
    * @param serviceId  Unique service identifier (e.g. `"cryptotrader-server"`).
@@ -143,7 +189,11 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       { field: "DATABASE_POSTGRES_HOST", envAliases: ["POSTGRES_HOST"] },
       { field: "DATABASE_POSTGRES_PORT", envAliases: ["POSTGRES_PORT"] },
       { field: "DATABASE_POSTGRES_USER", envAliases: ["POSTGRES_USER"] },
-      { field: "DATABASE_POSTGRES_PASSWORD", sensitive: true, envAliases: ["POSTGRES_PASSWORD"] },
+      {
+        field: "DATABASE_POSTGRES_PASSWORD",
+        sensitive: true,
+        envAliases: ["POSTGRES_PASSWORD"],
+      },
       { field: "DATABASE_POSTGRES_DATABASE", envAliases: ["POSTGRES_DB"] },
       { field: "OPENTELEMETRY_COLLECTOR_HTTP_TRACES" },
       { field: "OPENTELEMETRY_COLLECTOR_HTTP_METRICS" },
@@ -201,7 +251,7 @@ export abstract class ConfigBase implements ConfigCommonInterface {
     log(`Configuration Value: SERVICE_ID: ${this.SERVICE_ID}`);
     log(`Configuration Value: VERSION: ${this.VERSION}`);
 
-    for (const { field, sensitive, envAliases } of this._fields) {
+    for (const { field, sensitive, envAliases, defaultValue } of this._fields) {
       let from = "defaults";
       let foundValue: string | undefined;
       let usedAlias = false;
@@ -224,10 +274,11 @@ export abstract class ConfigBase implements ConfigCommonInterface {
         }
       }
 
-      // 3. Apply environment value (full name or alias) if found
+      // 3. Apply environment value (full name or alias) if found,
+      //    coercing strings to match the default value type
       if (foundValue !== undefined) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (this as any)[field] = foundValue;
+        (this as any)[field] = coerceValue(foundValue, defaultValue);
       }
 
       // 4. Config file override (environment always wins, but if neither
