@@ -11,6 +11,19 @@ export interface ConfigFieldDef {
   field: string;
   /** When `true` the value is masked in log output. */
   sensitive?: boolean;
+  /**
+   * Alternative environment variable names to check when the primary field
+   * name is not found in `process.env`.  Aliases are tried in order and the
+   * first match wins.  Only checked in the environment layer, never in the
+   * config-file layer.
+   *
+   * @example
+   * ```ts
+   * // Look for DATABASE_POSTGRES_HOST first, then fall back to POSTGRES_HOST
+   * { field: "DATABASE_POSTGRES_HOST", envAliases: ["POSTGRES_HOST"] }
+   * ```
+   */
+  envAliases?: string[];
 }
 
 /**
@@ -97,7 +110,7 @@ export abstract class ConfigBase implements ConfigCommonInterface {
    * should process.  Common / DB / OTel fields are pre-registered.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private _fields: { field: string; sensitive: boolean; defaultValue: any }[] =
+  private _fields: { field: string; sensitive: boolean; envAliases: string[]; defaultValue: any }[] =
     [];
 
   /**
@@ -127,11 +140,11 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       { field: "JWT_KEY", sensitive: true },
       { field: "LOG_LEVEL" },
       { field: "DATABASE_TYPE" },
-      { field: "DATABASE_POSTGRES_HOST" },
-      { field: "DATABASE_POSTGRES_PORT" },
-      { field: "DATABASE_POSTGRES_USER" },
-      { field: "DATABASE_POSTGRES_PASSWORD", sensitive: true },
-      { field: "DATABASE_POSTGRES_DATABASE" },
+      { field: "DATABASE_POSTGRES_HOST", envAliases: ["POSTGRES_HOST"] },
+      { field: "DATABASE_POSTGRES_PORT", envAliases: ["POSTGRES_PORT"] },
+      { field: "DATABASE_POSTGRES_USER", envAliases: ["POSTGRES_USER"] },
+      { field: "DATABASE_POSTGRES_PASSWORD", sensitive: true, envAliases: ["POSTGRES_PASSWORD"] },
+      { field: "DATABASE_POSTGRES_DATABASE", envAliases: ["POSTGRES_DB"] },
       { field: "OPENTELEMETRY_COLLECTOR_HTTP_TRACES" },
       { field: "OPENTELEMETRY_COLLECTOR_HTTP_METRICS" },
       { field: "OPENTELEMETRY_COLLECTOR_HTTP_LOGS" },
@@ -160,6 +173,7 @@ export abstract class ConfigBase implements ConfigCommonInterface {
     this._fields.push({
       field: def.field,
       sensitive: def.sensitive ?? false,
+      envAliases: def.envAliases ?? [],
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       defaultValue: (this as any)[def.field],
     });
@@ -187,17 +201,43 @@ export abstract class ConfigBase implements ConfigCommonInterface {
     log(`Configuration Value: SERVICE_ID: ${this.SERVICE_ID}`);
     log(`Configuration Value: VERSION: ${this.VERSION}`);
 
-    for (const { field, sensitive } of this._fields) {
+    for (const { field, sensitive, envAliases } of this._fields) {
       let from = "defaults";
+      let foundValue: string | undefined;
+      let usedAlias = false;
+
+      // 1. Primary environment variable name
       if (process.env[field] !== undefined) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (this as any)[field] = process.env[field];
+        foundValue = process.env[field];
         from = "environment";
-      } else if (content[field] !== undefined) {
+      }
+
+      // 2. Check aliases if primary env var was not set
+      if (foundValue === undefined && envAliases.length > 0) {
+        for (const alias of envAliases) {
+          if (process.env[alias] !== undefined) {
+            foundValue = process.env[alias];
+            from = "environment";
+            usedAlias = true;
+            break;
+          }
+        }
+      }
+
+      // 3. Apply environment value (full name or alias) if found
+      if (foundValue !== undefined) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (this as any)[field] = foundValue;
+      }
+
+      // 4. Config file override (environment always wins, but if neither
+      //    environment nor alias matched, check config file)
+      if (foundValue === undefined && content[field] !== undefined) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (this as any)[field] = content[field];
         from = "config";
       }
+
       if (sensitive) {
         log(
           `Configuration Value: ${field}: ******************** (from ${from})`,
@@ -205,7 +245,7 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       } else {
         log(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          `Configuration Value: ${field}: ${(this as any)[field]} (from ${from})`,
+          `Configuration Value: ${field}: ${(this as any)[field]} (from ${from}${usedAlias ? ` via alias` : ""})`,
         );
       }
     }
