@@ -1,0 +1,17 @@
+name: Main Build
+
+on:
+  push:
+    branches: ["main"]
+
+  workflow_dispatch:
+
+jobs:
+  npm-merge:
+    uses: devopsplaybook-io/common-utils/.github/workflows/reusable-npm-merge.yml@main
+    with:
+      npm_package_name: "@devopsplaybook.io/common-utils"
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      QUALITY_DASHBOARD_URL: ${{ secrets.QUALITY_DASHBOARD_URL }}
+      QUALITY_DASHBOARD_TOKEN: ${{ secrets.QUALITY_DASHBOARD_TOKEN }}
