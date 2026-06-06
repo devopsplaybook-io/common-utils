@@ -151,11 +151,11 @@ export abstract class ConfigBase implements ConfigCommonInterface {
    * Fields registered by subclasses (or the base) that {@link reload}
    * should process.  Common / DB / OTel fields are pre-registered.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _fields: {
     field: string;
     sensitive: boolean;
     envAliases: string[];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     defaultValue: any;
   }[] = [];
 
