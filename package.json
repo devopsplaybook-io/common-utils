@@ -1,6 +1,6 @@
 {
   "name": "@devopsplaybook.io/common-utils",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Shared utility modules for devopsplaybook.io projects (DB, Config, OTel context, system helpers)",
   "keywords": [
     "Open Telemetry",
@@ -37,7 +37,7 @@
     "@types/node": "^26.2.0",
     "@types/pg": "^8.23.1",
     "@types/uuid": "^11.0.0",
-    "eslint": "^10.8.1",
+    "eslint": "^10.9.0",
     "jest": "^30.4.2",
     "ts-jest": "^29.4.12",
     "ts-node": "^10.9.2",
