@@ -33,6 +33,7 @@ npm install @devopsplaybook.io/common-utils
 | `pg`                            | PostgreSQL client (`Pool`)                          |
 | `fs-extra`                      | File system helpers                                 |
 | `uuid`                          | UUID generation for JWT keys                        |
+| `axios`                         | HTTP client for the notifications integration        |
 
 ### Modules
 
@@ -287,6 +288,48 @@ DbUtilsNoTelemetryBatchInsert(
 | `DbUtilsNoTelemetryExecSQL(sql, params?)`                 | Write without spans               |
 | `DbUtilsNoTelemetryQuerySQL(sql, params?, debug?)`        | Read without spans                |
 | `DbUtilsNoTelemetryBatchInsert(tableCols, numCols, rows)` | Optimized multi-row INSERT        |
+
+---
+
+#### `Notifications` -- Central Notifications Client
+
+Fail-safe client for sending notifications to the central notifications service (the `notifications` project). The client never throws when misconfigured: it is simply disabled, the integration status is logged exactly once at construction time, and follow-up `send` calls on a disabled client are silent and resolve to `null`.
+
+```ts
+import { NotificationsClient } from "@devopsplaybook.io/common-utils";
+
+const client = new NotificationsClient({
+  apiEndpoint: config.NOTIFICATIONS_API,
+  apiToken: config.NOTIFICATIONS_TOKEN,
+  logger: OTelLogger().createModuleLogger("notifications"),
+});
+
+// Optional helpers per severity
+await client.info("Job started", "Nightly sync running", "my-app");
+await client.success("Job finished", "Nightly sync done", "my-app");
+await client.warning("Disk usage high", "85% on /data", "my-app");
+await client.error("Job failed", "Nightly sync crashed", "my-app");
+
+// Or a full payload
+await client.send({
+  title: "Deployment finished",
+  body: "Version 1.2.3 deployed to production",
+  source: "my-app",
+  severity: "success",
+  data: JSON.stringify({ version: "1.2.3" }),
+});
+```
+
+| Export                 | Description                                                       |
+| ---------------------- | ----------------------------------------------------------------- |
+| `NotificationsClient`  | HTTP client with `send` plus `info`/`success`/`warning`/`error` helpers |
+| `NotificationsConfig`  | `{ apiEndpoint, apiToken, logger? }` constructor configuration      |
+| `NotificationPayload`  | `{ title, body?, source?, severity?, data? }` request payload      |
+| `NotificationResponse` | Shape returned by the notifications API                            |
+| `NotificationSeverity` | `"info" \| "warning" \| "error" \| "success"`                    |
+| `NotificationsLogger` | Minimal logger interface (`info`/`warn`/`error`), console by default |
+
+**Behaviour when not configured**: when `apiEndpoint` or `apiToken` is empty the client logs `"Notifications integration disabled (...)"` once at construction and every `send`/helper call resolves to `null` without logging, so the parent application never fails.
 
 ---
 
