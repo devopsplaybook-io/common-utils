@@ -20,6 +20,11 @@ src/
   PostgresDbUtils.ts        # PostgreSQL operations (pg.Pool, async/Promise)
   DbUtils.ts                # Unified facade dispatching to Sql or Postgres
   DbUtilsNoTelemetry.ts     # Same DB ops without OTel span overhead
+  User.ts / UserSession.ts  # User model, roles and application-defined scopes
+  Auth.ts                   # JWT auth (key init, guards, session decode)
+  UserPassword.ts           # bcrypt password hashing/verification
+  UsersData.ts              # Users table CRUD (SQLite/Postgres)
+  UsersRoutes.ts            # Standard fastify user management routes
   SystemCommand.ts          # Promise wrapper around child_process.exec
   Timeout.ts                # Promise wrapper around setTimeout
   *.spec.ts                 # Co-located test files
@@ -41,6 +46,7 @@ src/
 - **Tests**: Jest with `ts-jest`. Spec files live next to source (`*.spec.ts`). Run with `npm run test`. The `tsconfig.spec.json` includes jest types.
 - **No default exports**: All modules use named exports only.
 - **OTel dependency injection**: Every DB module exposes a `*SetOTel(tracer, logger)` function that must be called before `*Init()`. OTel instances are stored as module-level singletons.
+- **Auth modules**: `AuthSetOTel(tracer)` and `UsersDataSetOTel(tracer)` must be called before `AuthInit`. Application scopes are registered through `AuthInit(context, config, allScopes)`; `UsersRoutes` relies on `req.tracerSpanApi` set by the `otel-utils-fastify` hooks.
 - **ModuleLogger pattern**: `StandardLogger` only exposes `createModuleLogger(name)`. DB modules call `logger.createModuleLogger("ModuleName")` internally. Never call `.info()` or `.error()` directly on a `StandardLogger`.
 - **SQLite-first SQL**: Write SQL with `?` placeholders. The `DbUtils` facade and `DbUtilsNoTelemetry` module auto-convert to `$1, $2, ...` for Postgres via `convertToPostgresPlaceholders()`.
 - **Migration convention**: SQL files named `init-NNNN.sql`. `init-0000.sql` must create the `metadata` table. Subsequent files are applied in lexicographic order; applied versions are tracked in `metadata` for idempotency.
@@ -65,6 +71,9 @@ All three commands must pass before committing. The CI pipeline (`reusable-npm-m
 | `pg`                            | PostgreSQL client with connection pooling                                                  |
 | `uuid`                          | v14+ (ESM -- requires `jest.mock("uuid")` in tests)                                        |
 | `fs-extra`                      | Async/sync file operations, `readJson`/`ensureDir`                                         |
+| `bcrypt`                        | Password hashing (users module)                                                            |
+| `jsonwebtoken`                  | JWT signing/verification (auth module)                                                     |
+| `fastify`                       | HTTP framework types used by `UsersRoutes`                                                 |
 
 ## Known Gotchas
 
