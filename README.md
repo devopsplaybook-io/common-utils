@@ -34,6 +34,9 @@ npm install @devopsplaybook.io/common-utils
 | `fs-extra`                      | File system helpers                                 |
 | `uuid`                          | UUID generation for JWT keys                        |
 | `axios`                         | HTTP client for the notifications integration        |
+| `bcrypt`                        | Password hashing for the users module               |
+| `jsonwebtoken`                  | JWT signing/verification for the auth module        |
+| `fastify`                       | HTTP framework types for the users routes           |
 
 ### Modules
 
@@ -330,6 +333,47 @@ await client.send({
 | `NotificationsLogger` | Minimal logger interface (`info`/`warn`/`error`), console by default |
 
 **Behaviour when not configured**: when `apiEndpoint` or `apiToken` is empty the client logs `"Notifications integration disabled (...)"` once at construction and every `send`/helper call resolves to `null` without logging, so the parent application never fails.
+
+---
+
+#### `Auth`, `User`, `UserSession`, `UserPassword`, `UsersData`, `UsersRoutes` -- Authentication and User Management
+
+Standard JWT-based authentication and user management shared across all server projects: JWT key persistence in the `metadata` table, request authentication helpers, bcrypt password hashing, users CRUD, and ready-to-register fastify routes (login, user CRUD, password change).
+
+```ts
+import {
+  AuthSetOTel,
+  AuthInit,
+  UsersDataSetOTel,
+  UsersRoutes,
+} from "@devopsplaybook.io/common-utils";
+
+// At startup, after DbUtilsInit:
+AuthSetOTel(otel.OTelTracer());
+UsersDataSetOTel(otel.OTelTracer());
+await AuthInit(span, config, ["traces", "metrics", "logs"]); // app scopes
+
+// Register the standard user routes:
+fastify.register(new UsersRoutes().getRoutes, { prefix: "/api/users" });
+```
+
+| Export                       | Description                                                            |
+| ---------------------------- | ---------------------------------------------------------------------- |
+| `AuthSetOTel`                | Injects the OTel tracer used by the auth module (before `AuthInit`)    |
+| `AuthInit`                   | Registers app scopes, loads or generates the JWT key from `metadata`   |
+| `AuthGenerateJWT`            | Signs a JWT for a user (admins get all scopes)                         |
+| `AuthMustBeAuthenticated`    | 403 guard: any valid JWT                                               |
+| `AuthMustBeAdmin`            | 403 guard: `role === "admin"`                                          |
+| `AuthHasScope`               | 403 guard: admin or JWT containing the requested scope                 |
+| `AuthGetUserSession`         | Returns the `UserSession` decoded from the request JWT                 |
+| `User`, `UserRole`, `UserScope` | User model; scopes are application-defined strings                  |
+| `UserSession`                | Decoded session: `isAuthenticated`, `userId`, `userName`, `role`, `scopes` |
+| `UserPasswordSetPassword` / `UserPasswordCheckPassword` | bcrypt hashing and verification             |
+| `UsersDataSetOTel`           | Injects the OTel tracer used by the users data module                  |
+| `UsersData*`                 | Users table CRUD (`Get`, `GetByName`, `List`, `Add`, `UpdateUser`, `UpdatePassword`, `Delete`) |
+| `UsersRoutes`                | Fastify routes: `GET /status/initialization`, `POST /session`, user CRUD, `PUT /password` |
+
+**Requirements**: a `users` table (columns `id`, `name`, `passwordEncrypted`, `role`, `scopes`) and the standard `metadata` table created by `init-0000.sql`. SQL is written SQLite-first; the `DbUtils` facade converts placeholders for Postgres.
 
 ---
 
