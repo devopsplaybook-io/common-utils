@@ -20,11 +20,13 @@ src/
   PostgresDbUtils.ts        # PostgreSQL operations (pg.Pool, async/Promise)
   DbUtils.ts                # Unified facade dispatching to Sql or Postgres
   DbUtilsNoTelemetry.ts     # Same DB ops without OTel span overhead
-  User.ts / UserSession.ts  # User model, roles and application-defined scopes
-  Auth.ts                   # JWT auth (key init, guards, session decode)
-  UserPassword.ts           # bcrypt password hashing/verification
-  UsersData.ts              # Users table CRUD (SQLite/Postgres)
-  UsersRoutes.ts            # Standard fastify user management routes
+  users/                    # Auth & user management module set
+    User.ts                 # User model, roles and application-defined scopes
+    UserSession.ts          # Decoded JWT session
+    Auth.ts                 # JWT auth (key init, guards, session decode)
+    UserPassword.ts         # bcrypt password hashing/verification
+    UsersData.ts            # Users table CRUD (SQLite/Postgres)
+    UsersRoutes.ts          # Standard fastify user management routes
   SystemCommand.ts          # Promise wrapper around child_process.exec
   Timeout.ts                # Promise wrapper around setTimeout
   *.spec.ts                 # Co-located test files

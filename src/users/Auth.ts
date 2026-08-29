@@ -2,7 +2,7 @@ import { StandardTracer } from "@devopsplaybook.io/otel-utils";
 import { Span } from "@opentelemetry/sdk-trace-base";
 import * as jwt from "jsonwebtoken";
 import { v4 as uuidv4 } from "uuid";
-import { DbUtilsQuerySQL } from "./DbUtils";
+import { DbUtilsQuerySQL } from "../DbUtils";
 import { User, UserScope } from "./User";
 import { UserSession } from "./UserSession";
 
