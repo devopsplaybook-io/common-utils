@@ -197,6 +197,61 @@ describe("LLMClient", () => {
       );
     });
 
+    it("should override the timeout per request", async () => {
+      mockPost.mockResolvedValue({
+        data: {
+          choices: [{ message: { content: "ok" } }],
+          usage: { total_tokens: 1 },
+        },
+      });
+      const client = createEnabledClient();
+
+      await client.request([{ role: "user", content: "hello" }], {
+        timeoutMs: 600000,
+      });
+
+      expect(mockPost).toHaveBeenCalledWith(
+        "",
+        expect.anything(),
+        expect.objectContaining({ timeout: 600000 }),
+      );
+    });
+
+    it("should disable the timeout when timeoutMs is 0", async () => {
+      mockPost.mockResolvedValue({
+        data: {
+          choices: [{ message: { content: "ok" } }],
+          usage: { total_tokens: 1 },
+        },
+      });
+      const client = createEnabledClient();
+
+      await client.request([{ role: "user", content: "hello" }], {
+        timeoutMs: 0,
+      });
+
+      expect(mockPost).toHaveBeenCalledWith(
+        "",
+        expect.anything(),
+        expect.objectContaining({ timeout: 0 }),
+      );
+    });
+
+    it("should not pass a request config when no timeout override is given", async () => {
+      mockPost.mockResolvedValue({
+        data: {
+          choices: [{ message: { content: "ok" } }],
+          usage: { total_tokens: 1 },
+        },
+      });
+      const client = createEnabledClient();
+
+      await client.request([{ role: "user", content: "hello" }]);
+
+      expect(mockPost).toHaveBeenCalledTimes(1);
+      expect(mockPost.mock.calls[0]).toHaveLength(2);
+    });
+
     it("should default totalTokens to 0 and content to empty string", async () => {
       mockPost.mockResolvedValue({
         data: { choices: [{ message: { content: null } }] },

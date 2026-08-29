@@ -43,6 +43,13 @@ export interface LLMRequestOptions {
   jsonMode?: boolean;
   /** Override the configured model for this call */
   model?: string;
+  /**
+   * Override the configured timeout for this call, in milliseconds.
+   * Set `0` to disable the timeout entirely, for slow models or very large
+   * completions that legitimately exceed the client-level timeout.
+   * When omitted, the client-level `timeoutMs` applies.
+   */
+  timeoutMs?: number;
 }
 
 /**
@@ -135,7 +142,8 @@ export class LLMClient {
    * Send a chat completion request.
    *
    * @param messages  The chat messages to send.
-   * @param options   Optional per-request overrides (JSON mode, model).
+   * @param options   Optional per-request overrides (JSON mode, model,
+   *                  timeout). `timeoutMs: 0` disables the request timeout.
    * @returns The first choice content and total token usage.
    * @throws When the client is disabled, the provider returns an error, or
    *         the response has no choices.
@@ -162,7 +170,10 @@ export class LLMClient {
     }
 
     try {
-      const response = await this.client.post("", body);
+      const response =
+        options?.timeoutMs !== undefined
+          ? await this.client.post("", body, { timeout: options.timeoutMs })
+          : await this.client.post("", body);
       const choice = response.data?.choices?.[0];
       if (!choice) {
         throw new Error("LLM response has no choices");
