@@ -5,6 +5,7 @@ export * from "./src/DbUtilsNoTelemetry";
 export * from "./src/SqlDbUtils";
 export * from "./src/PostgresDbUtils";
 export * from "./src/Notifications";
+export * from "./src/LLM";
 export * from "./src/SystemCommand";
 export * from "./src/Timeout";
 export * from "./src/users/User";

@@ -33,7 +33,7 @@ npm install @devopsplaybook.io/common-utils
 | `pg`                            | PostgreSQL client (`Pool`)                          |
 | `fs-extra`                      | File system helpers                                 |
 | `uuid`                          | UUID generation for JWT keys                        |
-| `axios`                         | HTTP client for the notifications integration        |
+| `axios`                         | HTTP client for the notifications and LLM integrations |
 | `bcrypt`                        | Password hashing for the users module               |
 | `jsonwebtoken`                  | JWT signing/verification for the auth module        |
 | `fastify`                       | HTTP framework types for the users routes           |
@@ -333,6 +333,48 @@ await client.send({
 | `NotificationsLogger` | Minimal logger interface (`info`/`warn`/`error`), console by default |
 
 **Behaviour when not configured**: when `apiEndpoint` or `apiToken` is empty the client logs `"Notifications integration disabled (...)"` once at construction and every `send`/helper call resolves to `null` without logging, so the parent application never fails.
+
+---
+
+#### `LLM` -- OpenAI-Compatible Chat Completions Client
+
+Client for any OpenAI-compatible chat completions API (DeepSeek, Moonshot, Ollama, etc.), centralizing the `LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL` integration used across server projects. The client follows the same fail-safe pattern as the notifications client: it is disabled (and logs once at construction) when `apiKey`, `apiUrl` or `model` is missing. Unlike notifications, `request` on a disabled client throws, since a silently empty LLM result is rarely what the caller wants — check `isEnabled()` first.
+
+```ts
+import { LLMClient } from "@devopsplaybook.io/common-utils";
+
+const llm = new LLMClient({
+  apiKey: config.LLM_API_KEY,
+  apiUrl: config.LLM_API_URL,
+  model: config.LLM_MODEL,
+  logger: OTelLogger().createModuleLogger("llm"),
+});
+
+if (llm.isEnabled()) {
+  const response = await llm.request([
+    { role: "system", content: "You summarize text." },
+    { role: "user", content: someText },
+  ]);
+  console.log(response.content, response.totalTokens);
+
+  // JSON output mode (response_format: json_object) and per-call model override
+  const json = await llm.request(
+    [{ role: "user", content: "Reply with a JSON object" }],
+    { jsonMode: true, model: "other-model" },
+  );
+}
+```
+
+| Export               | Description                                                                |
+| -------------------- | -------------------------------------------------------------------------- |
+| `LLMClient`          | HTTP client with `isEnabled()` and `request(messages, options?)`           |
+| `LLMClientConfig`    | `{ apiKey, apiUrl, model, timeoutMs?, logger? }` constructor configuration |
+| `LLMMessage`         | `{ role, content }` chat message                                           |
+| `LLMRequestOptions`  | `{ jsonMode?, model? }` per-request overrides                              |
+| `LLMResponse`        | `{ content, totalTokens }` normalized response                             |
+| `LLMLogger`          | Minimal logger interface (`info`/`error`), console by default              |
+
+**Behaviour details**: requests are sent with `stream: false` and Bearer authentication; the default timeout is 120 seconds (`timeoutMs` overrides it). Provider errors are rethrown as `Error` carrying the provider message when available (e.g., `error.message` from the HTTP response). An empty content is returned as-is — applications that need an empty-content policy (e.g., retry on reasoning models) keep it in their own code.
 
 ---
 

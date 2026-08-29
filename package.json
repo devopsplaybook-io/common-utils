@@ -1,7 +1,7 @@
 {
   "name": "@devopsplaybook.io/common-utils",
-  "version": "1.4.0",
-  "description": "Shared utility modules for devopsplaybook.io projects (DB, Config, OTel context, auth/users, notifications, system helpers)",
+  "version": "1.5.0",
+  "description": "Shared utility modules for devopsplaybook.io projects (DB, Config, OTel context, auth/users, notifications, LLM, system helpers)",
   "keywords": [
     "Open Telemetry",
     "OTel",
@@ -12,6 +12,7 @@
     "JWT",
     "Users",
     "Notifications",
+    "LLM",
     "Utilities"
   ],
   "license": "ISC",
