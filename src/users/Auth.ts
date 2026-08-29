@@ -2,7 +2,7 @@ import { StandardTracer } from "@devopsplaybook.io/otel-utils";
 import { Span } from "@opentelemetry/sdk-trace-base";
 import * as jwt from "jsonwebtoken";
 import { v4 as uuidv4 } from "uuid";
-import { DbUtilsQuerySQL } from "../DbUtils";
+import { DbUtilsExecSQL, DbUtilsQuerySQL } from "../DbUtils";
 import { User, UserScope } from "./User";
 import { UserSession } from "./UserSession";
 
@@ -48,7 +48,7 @@ export async function AuthInit(
   const authKeyRaw = await DbUtilsQuerySQL(span, SQL_QUERIES.GET_AUTH_TOKEN);
   if (authKeyRaw.length == 0) {
     configIn.JWT_KEY = uuidv4();
-    await DbUtilsQuerySQL(span, SQL_QUERIES.INSERT_AUTH_TOKEN, [
+    await DbUtilsExecSQL(span, SQL_QUERIES.INSERT_AUTH_TOKEN, [
       configIn.JWT_KEY,
       new Date().toISOString(),
     ]);
