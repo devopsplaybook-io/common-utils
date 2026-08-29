@@ -29,6 +29,7 @@ src/
     UsersRoutes.ts          # Standard fastify user management routes
   SystemCommand.ts          # Promise wrapper around child_process.exec
   Timeout.ts                # Promise wrapper around setTimeout
+  LLM.ts                    # OpenAI-compatible chat completions client (LLMClient)
   *.spec.ts                 # Co-located test files
 .github/workflows/
   main-build.yml            # Caller: push to main -> reusable-npm-merge
