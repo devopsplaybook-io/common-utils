@@ -29,11 +29,14 @@ on:
         required: false
 
 # Immutable build strategy: the image validated on the pull request is promoted
-# as-is, so merging runs no build, lint or test. `pull-requests: read` is needed
-# to resolve which PR produced the commit pushed to the default branch.
+# as-is, so merging runs no build, lint or test.
+#
+# `contents: read` only. Callers run with the default read-only token, whose
+# ceiling is `contents: read, pull-requests: none`, so requesting anything more
+# here makes the caller fail to start with "Invalid workflow file". The PR is
+# therefore resolved without needing pull-request scopes.
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
   promote-image:
@@ -64,21 +67,33 @@ jobs:
           SERVICE_VERSION=$(jq -r '.version' package.json)
           IMAGE="${DOCKER_HUB_USERNAME}/${SERVICE_NAME}"
 
-          # Find the PR that produced this commit. Works for squash, rebase and
-          # merge commits.
+          PR_NUMBER=""
+          PR_SOURCE="none"
+
+          # Preferred: ask the API which PR introduced this commit. This needs
+          # `pull-requests: read`, which callers on the default token are not
+          # granted, so a failure here is expected rather than exceptional.
           PR_NUMBER=$(curl -sfL \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
             | jq -r '.[0].number // empty' || true)
+          if [ -n "${PR_NUMBER}" ]; then
+            PR_SOURCE="api"
+          fi
 
-          # Fallback: read the PR number from the commit message, either
-          # "<title> (#123)" for squash/rebase or "Merge pull request #123".
+          # Fallback: parse the commit title, where GitHub writes the PR number
+          # for squash ("<title> (#123)") and merge ("Merge pull request #123")
+          # commits. Only the title is read, so a "fixes #99" reference in the
+          # commit body cannot select the wrong pull request.
           if [ -z "${PR_NUMBER}" ]; then
-            MESSAGE=$(git log -1 --pretty=%B)
-            PR_NUMBER=$(printf '%s' "${MESSAGE}" | grep -oE '\(#[0-9]+\)' | tail -1 | tr -d '(#)' || true)
+            TITLE=$(git log -1 --pretty=%s)
+            PR_NUMBER=$(printf '%s' "${TITLE}" | grep -oE '\(#[0-9]+\)' | tail -1 | tr -d '(#)' || true)
             if [ -z "${PR_NUMBER}" ]; then
-              PR_NUMBER=$(printf '%s' "${MESSAGE}" | grep -oE 'Merge pull request #[0-9]+' | grep -oE '[0-9]+' | tail -1 || true)
+              PR_NUMBER=$(printf '%s' "${TITLE}" | grep -oE 'Merge pull request #[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
+            fi
+            if [ -n "${PR_NUMBER}" ]; then
+              PR_SOURCE="commit-title"
             fi
           fi
 
@@ -105,11 +120,14 @@ jobs:
             echo "service_name=${SERVICE_NAME}"
             echo "service_version=${SERVICE_VERSION}"
             echo "pr_number=${PR_NUMBER}"
+            echo "pr_source=${PR_SOURCE}"
             echo "source_image=${SOURCE_IMAGE}"
             echo "strategy=${STRATEGY}"
           } >> "${GITHUB_OUTPUT}"
 
-          echo "Service: ${SERVICE_NAME} ${SERVICE_VERSION}"
+          echo "Service:  ${SERVICE_NAME} ${SERVICE_VERSION}"
+          echo "PR:       ${PR_NUMBER:-none} (resolved via ${PR_SOURCE})"
+          echo "Source:   ${SOURCE_IMAGE:-none}"
           echo "Strategy: ${STRATEGY}"
 
       - name: Promote the PR image to the release tags
