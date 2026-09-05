@@ -123,13 +123,28 @@ jobs:
           password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
 
       - name: Build and Push Docker Image
+        env:
+          DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
+          DOCKER_PLATFORMS: ${{ inputs.docker_platforms }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -e
-          SERVICE_NAME=$(cat package.json | jq -r '.name')
-          echo "Building ${SERVICE_NAME}:beta"
+          SERVICE_NAME=$(jq -r '.name' package.json)
+          IMAGE="${DOCKER_HUB_USERNAME}/${SERVICE_NAME}"
+
+          # `beta-pr-<number>` is the immutable per-PR reference: it identifies
+          # exactly the artifact validated by this pull request, and the merge
+          # build promotes it as-is to the semantic version tags.
+          PR_TAG="${PR_NUMBER}"
+          if [ -z "${PR_TAG}" ]; then
+            PR_TAG="manual-${GITHUB_SHA::7}"
+          fi
+
+          echo "Building ${IMAGE}:beta-pr-${PR_TAG} and ${IMAGE}:beta"
           docker buildx build \
-            --platform ${{ inputs.docker_platforms }} \
+            --platform "${DOCKER_PLATFORMS}" \
             --push \
             -f Dockerfile \
-            -t ${{ secrets.DOCKER_HUB_USERNAME }}/${SERVICE_NAME}:beta \
+            -t "${IMAGE}:beta-pr-${PR_TAG}" \
+            -t "${IMAGE}:beta" \
             .
