@@ -484,8 +484,8 @@ The `.github/workflows/` directory contains **reusable workflows** that other re
 | **NPM Merge**   | `reusable-npm-merge.yml`   | `workflow_call` | Lint, test, build, and publish a release to npm on merge to main. Uploads coverage to Quality Dashboard. Only publishes if the version doesn't already exist. |
 | **NPM PR**      | `reusable-npm-pr.yml`      | `workflow_call` | Lint, test, and build on PR. Publishes a **beta** version tagged `beta` and comments the PR with install instructions.                                        |
 | **NPM Upgrade** | `reusable-npm-upgrade.yml` | `workflow_call` | Runs `npm-check-updates -u`, bumps the patch version, and opens a PR. Supports monorepo sub-folders via `npm_services` input.                                 |
-| **PR Verify**   | `reusable-pr-verify.yml`   | `workflow_call` | Matrix build/lint/test for multiple Node.js apps plus multi-platform Docker build. For monorepos with Docker images.                                          |
-| **Merge Build** | `reusable-merge-build.yml` | `workflow_call` | Same as PR Verify but on merge. Tags Docker images with `latest`, version, major, and minor tags.                                                             |
+| **PR Verify**   | `reusable-pr-verify.yml`   | `workflow_call` | Matrix build/lint/test for multiple Node.js apps, plus a multi-platform Docker build pushed as `beta-pr-<PR number>` and `beta`. For monorepos with Docker images. |
+| **Merge Build** | `reusable-merge-build.yml` | `workflow_call` | Promotes the image validated by the merged PR to the `latest`, version, major and minor tags. Runs no build, lint or test.                                      |
 
 ### Inputs and Secrets
 
@@ -517,12 +517,52 @@ The `.github/workflows/` directory contains **reusable workflows** that other re
 | `node_app_directories` | No       | `""`                         | JSON array of Node.js app directories |
 | `node_version`         | No       | `"22"`                       | Node.js version                       |
 
+`reusable-merge-build` declares the same inputs so existing callers keep working, but it only reads `docker_platforms`, and only on the build fallback path. `node_app_directories` and `node_version` are ignored there because merging runs no Node.js job.
+
 | Secret                    | Required | Description                    |
 | ------------------------- | -------- | ------------------------------ |
 | `DOCKER_HUB_USERNAME`     | Yes      | Docker Hub username            |
 | `DOCKER_HUB_ACCESS_TOKEN` | Yes      | Docker Hub access token        |
 | `QUALITY_DASHBOARD_URL`   | No       | Quality Dashboard URL          |
 | `QUALITY_DASHBOARD_TOKEN` | No       | Quality Dashboard upload token |
+
+`reusable-merge-build` also still declares the Quality Dashboard secrets for backward compatibility, but no longer uploads coverage: each report is produced once, on the pull request.
+
+### Immutable Docker Build Strategy
+
+Docker images are built **once**, on the pull request, and **promoted** on merge. The artifact you test is bit-for-bit the artifact you release.
+
+| Stage            | Workflow               | Registry tags written                                                                                       |
+| ---------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Pull request     | `reusable-pr-verify`   | `beta-pr-<PR number>` (identifies this PR's artifact) and `beta` (moving pointer to the latest PR build)     |
+| Merge to default | `reusable-merge-build` | `<version>`, `<major>`, `<minor>` and `latest`, copied from `beta-pr-<PR number>`                            |
+
+On merge the workflow:
+
+1. Resolves the pull request behind the commit pushed to the default branch through `GET /repos/{owner}/{repo}/commits/{sha}/pulls`, falling back to the PR number in the commit **title** (`<title> (#123)` for squash and rebase, `Merge pull request #123` for merge commits). Only the title is parsed, so a `fixes #99` reference in the commit body cannot select the wrong pull request.
+2. Carbon-copies the manifest with `docker buildx imagetools create --prefer-index=false`, which preserves the exact digest and the full multi-platform image index.
+3. Reads back the digest of every tag it published and fails if one differs from the source.
+
+The resolve step logs how it reached its answer, which is the first thing to check when a merge falls back to a build:
+
+```text
+Service:  planner-llm-agent 0.2.0
+PR:       2 (resolved via api)
+Source:   <namespace>/planner-llm-agent:beta-pr-2
+Strategy: retag
+```
+
+`Strategy` is `retag` when the PR image was found and `build` when it was not.
+
+No `npm ci`, build, lint or test runs on merge, and no Docker build happens unless promotion is impossible. The build fallback keeps releases working when a commit reaches the default branch with no matching `beta-pr-<PR number>` image, such as a direct push, a rebase merge (which leaves no PR number in the commit title), or a PR whose image was deleted from the registry.
+
+> **Callers need no `permissions:` block.** `reusable-merge-build` requests only `contents: read`. A reusable workflow cannot ask for more than its caller is allowed, and the default read-only token ceiling is `contents: read, pull-requests: none` — requesting `pull-requests: read` makes the caller fail to start with `Invalid workflow file … The workflow is requesting 'pull-requests: read', but is only allowed 'pull-requests: none'`. The API lookup above works with `contents: read` alone.
+
+The image name and version come from the root `package.json`, so bump the minor version in the pull request that carries the change.
+
+> **Keep PR branches up to date with the default branch before merging.** The promoted image is the one built from the PR head, so if the default branch moved in the meantime the released artifact will not contain those commits.
+
+Validated end to end on `planner-llm-agent` 0.2.0: the pull request pushed `beta-pr-2` and `beta`, the merge promoted that image in **40 seconds** with no build, and `beta-pr-2`, `beta`, `0.2.0`, `0.2`, `0` and `latest` all resolve to the single digest `sha256:710fed19…` with identical per-architecture digests.
 
 ### Adopting in Your Project
 

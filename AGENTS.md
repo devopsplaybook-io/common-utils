@@ -38,8 +38,8 @@ src/
   reusable-npm-merge.yml    # Lint + test + build + publish release to npm
   reusable-npm-pr.yml       # Lint + test + build + publish beta tag + comment PR
   reusable-npm-upgrade.yml  # npm-check-updates + auto PR
-  reusable-pr-verify.yml    # Matrix Node.js + multi-platform Docker build for PRs
-  reusable-merge-build.yml  # Matrix Node.js + Docker build with version tags on merge
+  reusable-pr-verify.yml    # Matrix Node.js + multi-platform Docker build -> beta-pr-<PR> and beta
+  reusable-merge-build.yml  # Promotes the PR image to the version tags on merge (no build/lint/test)
 ```
 
 ## Key Conventions
@@ -53,6 +53,8 @@ src/
 - **ModuleLogger pattern**: `StandardLogger` only exposes `createModuleLogger(name)`. DB modules call `logger.createModuleLogger("ModuleName")` internally. Never call `.info()` or `.error()` directly on a `StandardLogger`.
 - **SQLite-first SQL**: Write SQL with `?` placeholders. The `DbUtils` facade and `DbUtilsNoTelemetry` module auto-convert to `$1, $2, ...` for Postgres via `convertToPostgresPlaceholders()`.
 - **Migration convention**: SQL files named `init-NNNN.sql`. `init-0000.sql` must create the `metadata` table. Subsequent files are applied in lexicographic order; applied versions are tracked in `metadata` for idempotency.
+- **Immutable Docker builds**: images are built once on the pull request (`reusable-pr-verify.yml` pushes `beta-pr-<PR number>` and `beta`) and promoted unchanged on merge (`reusable-merge-build.yml` writes `<version>`, `<major>`, `<minor>` and `latest`). The merge workflow runs no build, lint or test: it resolves the merged PR, carbon-copies the manifest with `docker buildx imagetools create --prefer-index=false`, then reads back each published digest and fails on a mismatch. It falls back to a full build only when no `beta-pr-<PR number>` image can be promoted. Image name and version come from the root `package.json`, and PR branches must be up to date with the default branch before merging.
+- **Reusable workflow permissions ceiling**: `reusable-merge-build.yml` may request only `contents: read`. A called workflow cannot exceed its caller's permissions, and callers use the default read-only token whose ceiling is `contents: read, pull-requests: none`. Adding `pull-requests: read` does not fail here — it fails in every consuming repo at startup with `Invalid workflow file ... requesting 'pull-requests: read', but is only allowed 'pull-requests: none'`. `GET /repos/{owner}/{repo}/commits/{sha}/pulls` works with `contents: read`, so no extra scope is needed.
 
 ## Build and Verification
 

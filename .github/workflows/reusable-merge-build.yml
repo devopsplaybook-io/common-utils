@@ -4,17 +4,17 @@ on:
   workflow_call:
     inputs:
       docker_platforms:
-        description: "Docker platforms to build for"
+        description: "Docker platforms, used only by the fallback build when no PR image can be promoted"
         required: false
         type: string
         default: "linux/arm64/v8,linux/amd64"
       node_app_directories:
-        description: "JSON array of Node.js app directories to build, lint, and test"
+        description: "Deprecated and unused. Kept so existing callers stay valid: the merge build runs no build, lint or test."
         required: false
         type: string
         default: ""
       node_version:
-        description: "Node.js version to use"
+        description: "Deprecated and unused. Kept so existing callers stay valid: the merge build runs no Node.js job."
         required: false
         type: string
         default: "22"
@@ -28,84 +28,18 @@ on:
       QUALITY_DASHBOARD_URL:
         required: false
 
+# Immutable build strategy: the image validated on the pull request is promoted
+# as-is, so merging runs no build, lint or test.
+#
+# `contents: read` only. Callers run with the default read-only token, whose
+# ceiling is `contents: read, pull-requests: none`, so requesting anything more
+# here makes the caller fail to start with "Invalid workflow file". The PR is
+# therefore resolved without needing pull-request scopes.
+permissions:
+  contents: read
+
 jobs:
-  node-build:
-    if: inputs.node_app_directories != ''
-    strategy:
-      matrix:
-        app: ${{ fromJSON(inputs.node_app_directories) }}
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ${{ matrix.app }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: ${{ inputs.node_version }}
-          cache: "npm"
-          cache-dependency-path: ${{ matrix.app }}/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build
-        run: npm run build
-
-      - name: Lint
-        run: npm run lint
-
-      - name: Test
-        run: npm run test
-
-      - name: Zip coverage and upload to Quality Dashboard
-        if: always()
-        env:
-          QUALITY_DASHBOARD_URL: ${{ secrets.QUALITY_DASHBOARD_URL }}
-          QUALITY_DASHBOARD_TOKEN: ${{ secrets.QUALITY_DASHBOARD_TOKEN }}
-        run: |
-          APP_NAME="${{ matrix.app }}"
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
-          REPORT_KEY="$(echo "$APP_NAME" | sed 's/[^a-zA-Z0-9._:\-\/]/_/g')_coverage"
-
-          if [ -d coverage ]; then
-            if [ -z "$QUALITY_DASHBOARD_URL" ] || [ -z "$QUALITY_DASHBOARD_TOKEN" ]; then
-              echo "Quality Dashboard URL or token not set, skipping upload"
-              exit 0
-            fi
-            # Zip coverage contents at root level so the jest processor
-            # finds coverage-final.json / clover.xml directly
-            (cd coverage && zip -r "${{ runner.temp }}/coverage.zip" .)
-
-            META=$(jq -n \
-              --arg key "$REPORT_KEY" \
-              --arg pkg "$PACKAGE_NAME" \
-              '{
-                key: $key,
-                displayName: "Coverage: \($pkg)",
-                processor: "jest"
-              }')
-
-            echo "Uploading coverage: $REPORT_KEY"
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-              -X POST "$QUALITY_DASHBOARD_URL/api/reports/" \
-              -H "x-upload-token: $QUALITY_DASHBOARD_TOKEN" \
-              -F "meta=$META" \
-              -F "file=@${{ runner.temp }}/coverage.zip" \
-              --max-time 30)
-
-            if [ "$HTTP_CODE" = "201" ]; then
-              echo "\u2713 Coverage uploaded ($HTTP_CODE)"
-            else
-              echo "\u26a0 Upload returned HTTP $HTTP_CODE"
-            fi
-          else
-            echo "No coverage/ directory found, skipping upload"
-          fi
-
-  docker-build:
+  promote-image:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -122,20 +56,142 @@ jobs:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
 
-      - name: Build and Push Docker Image
+      - name: Resolve the image validated by the merged PR
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
         run: |
           set -e
-          SERVICE_NAME=$(cat package.json | jq -r '.name')
-          SERVICE_VERSION=$(cat package.json | jq -r '.version')
-          SERVICE_VERSION_MAJOR=$(echo "${SERVICE_VERSION}" | cut -f1 -d".")
-          SERVICE_VERSION_MINOR=$(echo "${SERVICE_VERSION}" | cut -f1-2 -d".")
-          echo "Building ${SERVICE_NAME}:${SERVICE_VERSION}"
+          SERVICE_NAME=$(jq -r '.name' package.json)
+          SERVICE_VERSION=$(jq -r '.version' package.json)
+          IMAGE="${DOCKER_HUB_USERNAME}/${SERVICE_NAME}"
+
+          PR_NUMBER=""
+          PR_SOURCE="none"
+
+          # Preferred: ask the API which PR introduced this commit. This needs
+          # `pull-requests: read`, which callers on the default token are not
+          # granted, so a failure here is expected rather than exceptional.
+          PR_NUMBER=$(curl -sfL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+            | jq -r '.[0].number // empty' || true)
+          if [ -n "${PR_NUMBER}" ]; then
+            PR_SOURCE="api"
+          fi
+
+          # Fallback: parse the commit title, where GitHub writes the PR number
+          # for squash ("<title> (#123)") and merge ("Merge pull request #123")
+          # commits. Only the title is read, so a "fixes #99" reference in the
+          # commit body cannot select the wrong pull request.
+          if [ -z "${PR_NUMBER}" ]; then
+            TITLE=$(git log -1 --pretty=%s)
+            PR_NUMBER=$(printf '%s' "${TITLE}" | grep -oE '\(#[0-9]+\)' | tail -1 | tr -d '(#)' || true)
+            if [ -z "${PR_NUMBER}" ]; then
+              PR_NUMBER=$(printf '%s' "${TITLE}" | grep -oE 'Merge pull request #[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
+            fi
+            if [ -n "${PR_NUMBER}" ]; then
+              PR_SOURCE="commit-title"
+            fi
+          fi
+
+          SOURCE_IMAGE=""
+          if [ -z "${PR_NUMBER}" ]; then
+            echo "::warning::No pull request found for ${GITHUB_SHA}, falling back to a build."
+          else
+            CANDIDATE="${IMAGE}:beta-pr-${PR_NUMBER}"
+            if docker buildx imagetools inspect "${CANDIDATE}" > /dev/null 2>&1; then
+              SOURCE_IMAGE="${CANDIDATE}"
+            else
+              echo "::warning::${CANDIDATE} not found in the registry, falling back to a build."
+            fi
+          fi
+
+          if [ -n "${SOURCE_IMAGE}" ]; then
+            STRATEGY="retag"
+          else
+            STRATEGY="build"
+          fi
+
+          {
+            echo "image=${IMAGE}"
+            echo "service_name=${SERVICE_NAME}"
+            echo "service_version=${SERVICE_VERSION}"
+            echo "pr_number=${PR_NUMBER}"
+            echo "pr_source=${PR_SOURCE}"
+            echo "source_image=${SOURCE_IMAGE}"
+            echo "strategy=${STRATEGY}"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "Service:  ${SERVICE_NAME} ${SERVICE_VERSION}"
+          echo "PR:       ${PR_NUMBER:-none} (resolved via ${PR_SOURCE})"
+          echo "Source:   ${SOURCE_IMAGE:-none}"
+          echo "Strategy: ${STRATEGY}"
+
+      - name: Promote the PR image to the release tags
+        if: steps.resolve.outputs.strategy == 'retag'
+        env:
+          RELEASE_IMAGE: ${{ steps.resolve.outputs.image }}
+          RELEASE_VERSION: ${{ steps.resolve.outputs.service_version }}
+          SOURCE_IMAGE: ${{ steps.resolve.outputs.source_image }}
+          MERGED_PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+        run: |
+          set -e
+          MAJOR=$(echo "${RELEASE_VERSION}" | cut -f1 -d".")
+          MINOR=$(echo "${RELEASE_VERSION}" | cut -f1-2 -d".")
+
+          SOURCE_DIGEST=$(docker buildx imagetools inspect "${SOURCE_IMAGE}" --format '{{.Manifest.Digest}}')
+
+          echo "Promoting ${SOURCE_IMAGE} (PR #${MERGED_PR_NUMBER})"
+          echo "  digest ${SOURCE_DIGEST}"
+          echo "  -> ${RELEASE_IMAGE}:${RELEASE_VERSION}"
+          echo "  -> ${RELEASE_IMAGE}:${MAJOR}"
+          echo "  -> ${RELEASE_IMAGE}:${MINOR}"
+          echo "  -> ${RELEASE_IMAGE}:latest"
+
+          # --prefer-index=false forces a carbon copy of the source manifest, so
+          # the released image keeps the exact digest validated on the pull
+          # request. Without it, a single-platform source would be rewrapped into
+          # a new image index and the digest would change.
+          docker buildx imagetools create \
+            --prefer-index=false \
+            -t "${RELEASE_IMAGE}:${RELEASE_VERSION}" \
+            -t "${RELEASE_IMAGE}:${MAJOR}" \
+            -t "${RELEASE_IMAGE}:${MINOR}" \
+            -t "${RELEASE_IMAGE}:latest" \
+            "${SOURCE_IMAGE}"
+
+          # Fail loudly rather than publish an artifact that differs from the one
+          # tested on the pull request.
+          for TAG in "${RELEASE_VERSION}" "${MAJOR}" "${MINOR}" "latest"; do
+            PROMOTED_DIGEST=$(docker buildx imagetools inspect "${RELEASE_IMAGE}:${TAG}" --format '{{.Manifest.Digest}}')
+            if [ "${PROMOTED_DIGEST}" != "${SOURCE_DIGEST}" ]; then
+              echo "::error::${RELEASE_IMAGE}:${TAG} has digest ${PROMOTED_DIGEST}, expected ${SOURCE_DIGEST}"
+              exit 1
+            fi
+            echo "  verified ${RELEASE_IMAGE}:${TAG} -> ${PROMOTED_DIGEST}"
+          done
+
+      - name: Build and Push Docker Image (fallback)
+        if: steps.resolve.outputs.strategy == 'build'
+        env:
+          RELEASE_IMAGE: ${{ steps.resolve.outputs.image }}
+          RELEASE_VERSION: ${{ steps.resolve.outputs.service_version }}
+          DOCKER_PLATFORMS: ${{ inputs.docker_platforms }}
+        run: |
+          set -e
+          MAJOR=$(echo "${RELEASE_VERSION}" | cut -f1 -d".")
+          MINOR=$(echo "${RELEASE_VERSION}" | cut -f1-2 -d".")
+
+          echo "Building ${RELEASE_IMAGE}:${RELEASE_VERSION} from ${GITHUB_SHA}"
           docker buildx build \
-            --platform ${{ inputs.docker_platforms }} \
+            --platform "${DOCKER_PLATFORMS}" \
             --push \
             -f Dockerfile \
-            -t ${{ secrets.DOCKER_HUB_USERNAME }}/${SERVICE_NAME}:latest \
-            -t ${{ secrets.DOCKER_HUB_USERNAME }}/${SERVICE_NAME}:${SERVICE_VERSION} \
-            -t ${{ secrets.DOCKER_HUB_USERNAME }}/${SERVICE_NAME}:${SERVICE_VERSION_MAJOR} \
-            -t ${{ secrets.DOCKER_HUB_USERNAME }}/${SERVICE_NAME}:${SERVICE_VERSION_MINOR} \
+            -t "${RELEASE_IMAGE}:latest" \
+            -t "${RELEASE_IMAGE}:${RELEASE_VERSION}" \
+            -t "${RELEASE_IMAGE}:${MAJOR}" \
+            -t "${RELEASE_IMAGE}:${MINOR}" \
             .
