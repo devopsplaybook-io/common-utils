@@ -1,7 +1,10 @@
+import { createHash } from "crypto";
 import { Span } from "@opentelemetry/sdk-trace-base";
 import { FastifyInstance, RequestGenericInterface } from "fastify";
+import { v4 as uuidv4 } from "uuid";
 import { AuthGenerateJWT, AuthGetUserSession, AuthMustBeAdmin } from "./Auth";
 import { User } from "./User";
+import { UserApiToken } from "./UserApiToken";
 import {
   UserPasswordCheckPassword,
   UserPasswordSetPassword,
@@ -15,6 +18,13 @@ import {
   UsersDataUpdatePassword,
   UsersDataUpdateUser,
 } from "./UsersData";
+import {
+  UsersApiTokensDataAdd,
+  UsersApiTokensDataDelete,
+  UsersApiTokensDataDeleteByUser,
+  UsersApiTokensDataGet,
+  UsersApiTokensDataListByUser,
+} from "./UsersApiTokensData";
 
 /**
  * Retrieves the OTel span attached to the request by the
@@ -286,7 +296,80 @@ export class UsersRoutes {
       }
 
       await UsersDataDelete(context, req.params.id);
+      await UsersApiTokensDataDeleteByUser(context, req.params.id);
       res.status(201).send({});
+    });
+
+    // ==================== API TOKENS (self-service) ====================
+
+    interface PostApiToken extends RequestGenericInterface {
+      Body: {
+        name: string;
+      };
+    }
+    fastify.post<PostApiToken>("/tokens", async (req, res) => {
+      const context = requestSpan(req);
+      const userSession = await AuthGetUserSession(req);
+      if (!userSession.isAuthenticated) {
+        return res.status(403).send({ error: "Access Denied" });
+      }
+      if (!req.body || !req.body.name) {
+        return res.status(400).send({ error: "Missing: Name" });
+      }
+      const apiToken = new UserApiToken();
+      apiToken.name = req.body.name;
+      // isAuthenticated implies userId is set
+      apiToken.userId = userSession.userId as string;
+      apiToken.dateCreated = new Date().toISOString();
+      const token = uuidv4();
+      apiToken.tokenHash = createHash("sha256").update(token).digest("hex");
+      await UsersApiTokensDataAdd(context, apiToken);
+      // The plaintext token is returned once; only its hash is stored.
+      return res.status(201).send({
+        token,
+        ...apiToken.toTransportJson(),
+      });
+    });
+
+    fastify.get("/tokens", async (req, res) => {
+      const context = requestSpan(req);
+      const userSession = await AuthGetUserSession(req);
+      if (!userSession.isAuthenticated) {
+        return res.status(403).send({ error: "Access Denied" });
+      }
+      const apiTokens = await UsersApiTokensDataListByUser(
+        context,
+        userSession.userId as string,
+      );
+      return res
+        .status(200)
+        .send(apiTokens.map((t) => t.toTransportJson()));
+    });
+
+    interface DeleteApiToken extends RequestGenericInterface {
+      Params: {
+        id: string;
+      };
+    }
+    fastify.delete<DeleteApiToken>("/tokens/:id", async (req, res) => {
+      const context = requestSpan(req);
+      const userSession = await AuthGetUserSession(req);
+      if (!userSession.isAuthenticated) {
+        return res.status(403).send({ error: "Access Denied" });
+      }
+      const apiToken = await UsersApiTokensDataGet(context, req.params.id);
+      if (!apiToken) {
+        return res.status(404).send({ error: "API Token Not Found" });
+      }
+      // Owner can always revoke; admins can revoke any token
+      if (
+        apiToken.userId !== userSession.userId &&
+        userSession.role !== "admin"
+      ) {
+        return res.status(403).send({ error: "Access Denied" });
+      }
+      await UsersApiTokensDataDelete(context, apiToken.id);
+      return res.status(201).send({});
     });
   }
 }

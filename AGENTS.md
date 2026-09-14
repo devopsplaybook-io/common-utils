@@ -23,10 +23,12 @@ src/
   users/                    # Auth & user management module set
     User.ts                 # User model, roles and application-defined scopes
     UserSession.ts          # Decoded JWT session
-    Auth.ts                 # JWT auth (key init, guards, session decode)
+    UserApiToken.ts         # User API token model (SHA-256 hash only)
+    Auth.ts                 # JWT auth (key init, guards, session decode) + API token resolution
     UserPassword.ts         # bcrypt password hashing/verification
     UsersData.ts            # Users table CRUD (SQLite/Postgres)
-    UsersRoutes.ts          # Standard fastify user management routes
+    UsersApiTokensData.ts   # users_api_tokens table CRUD (SQLite/Postgres)
+    UsersRoutes.ts          # Standard fastify user management routes (incl. self-service API tokens)
   SystemCommand.ts          # Promise wrapper around child_process.exec
   Timeout.ts                # Promise wrapper around setTimeout
   LLM.ts                    # OpenAI-compatible chat completions client (LLMClient)

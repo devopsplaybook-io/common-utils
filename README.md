@@ -404,18 +404,23 @@ fastify.register(new UsersRoutes().getRoutes, { prefix: "/api/users" });
 | `AuthSetOTel`                | Injects the OTel tracer used by the auth module (before `AuthInit`)    |
 | `AuthInit`                   | Registers app scopes, loads or generates the JWT key from `metadata`   |
 | `AuthGenerateJWT`            | Signs a JWT for a user (admins get all scopes)                         |
-| `AuthMustBeAuthenticated`    | 403 guard: any valid JWT                                               |
+| `AuthMustBeAuthenticated`    | 403 guard: any valid JWT **or user API token**                         |
 | `AuthMustBeAdmin`            | 403 guard: `role === "admin"`                                          |
-| `AuthHasScope`               | 403 guard: admin or JWT containing the requested scope                 |
-| `AuthGetUserSession`         | Returns the `UserSession` decoded from the request JWT                 |
+| `AuthHasScope`               | 403 guard: admin or credentials containing the requested scope         |
+| `AuthGetUserSession`         | Returns the `UserSession` decoded from the request credentials         |
 | `User`, `UserRole`, `UserScope` | User model; scopes are application-defined strings                  |
 | `UserSession`                | Decoded session: `isAuthenticated`, `userId`, `userName`, `role`, `scopes` |
+| `UserApiToken`               | API token model (only the SHA-256 hash is persisted)                   |
 | `UserPasswordSetPassword` / `UserPasswordCheckPassword` | bcrypt hashing and verification             |
 | `UsersDataSetOTel`           | Injects the OTel tracer used by the users data module                  |
 | `UsersData*`                 | Users table CRUD (`Get`, `GetByName`, `List`, `Add`, `UpdateUser`, `UpdatePassword`, `Delete`) |
-| `UsersRoutes`                | Fastify routes: `GET /status/initialization`, `POST /session`, user CRUD, `PUT /password` |
+| `UsersApiTokensDataSetOTel`  | Injects the OTel tracer used by the API tokens data module             |
+| `UsersApiTokensData*`        | API tokens table CRUD (`Get`, `GetByTokenHash`, `ListByUser`, `Add`, `Delete`, `DeleteByUser`) |
+| `UsersRoutes`                | Fastify routes: `GET /status/initialization`, `POST /session`, user CRUD, `PUT /password`, API tokens (`POST/GET /tokens`, `DELETE /tokens/:id`) |
 
-**Requirements**: a `users` table (columns `id`, `name`, `passwordEncrypted`, `role`, `scopes`) and the standard `metadata` table created by `init-0000.sql`. SQL is written SQLite-first; the `DbUtils` facade converts placeholders for Postgres.
+**Requirements**: a `users` table (columns `id`, `name`, `passwordEncrypted`, `role`, `scopes`), the standard `metadata` table created by `init-0000.sql`, and a `users_api_tokens` table (columns `id`, `name`, `userId`, `tokenHash`, `dateCreated`, with a unique index on `tokenHash` and an index on `userId`) for the API token feature. SQL is written SQLite-first; the `DbUtils` facade converts placeholders for Postgres.
+
+**API tokens**: users create their own API tokens via `POST /api/users/tokens` (body `{ name }`); the plaintext token is returned exactly once and only its SHA-256 hash is stored. `GET /api/users/tokens` lists the caller's tokens and `DELETE /api/users/tokens/:id` revokes one (owner or admin). Requests authenticated with `Authorization: Bearer <api-token>` resolve to the owning user's live role and scopes on every request, so role/scope changes apply immediately and revocation is instant. Tokens are valid until revoked (no expiry).
 
 ---
 
