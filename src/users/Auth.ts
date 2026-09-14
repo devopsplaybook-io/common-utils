@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { StandardTracer } from "@devopsplaybook.io/otel-utils";
 import { Span } from "@opentelemetry/sdk-trace-base";
 import * as jwt from "jsonwebtoken";
@@ -5,6 +6,8 @@ import { v4 as uuidv4 } from "uuid";
 import { DbUtilsExecSQL, DbUtilsQuerySQL } from "../DbUtils";
 import { User, UserScope } from "./User";
 import { UserSession } from "./UserSession";
+import { UsersApiTokensDataGetByTokenHash } from "./UsersApiTokensData";
+import { UsersDataGet } from "./UsersData";
 
 /**
  * Configuration subset required by the auth module.
@@ -72,11 +75,18 @@ export async function AuthGenerateJWT(user: User): Promise<string> {
 }
 
 /**
- * Decode JWT from request, caching result on req._jwtPayload to avoid
- * redundant verification when multiple auth functions are called per request.
+ * Decode credentials from request, caching result on req._jwtPayload to
+ * avoid redundant resolution when multiple auth functions are called per
+ * request.
+ *
+ * A `Bearer` credential is first verified as a JWT. When JWT verification
+ * fails, the credential is resolved as a user API token: the value is
+ * SHA-256 hashed and looked up in `users_api_tokens`; on match, a payload
+ * mirroring the owning user's live role and scopes is built (valid until
+ * the token is revoked).
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function jwtDecodeCached(req: any): any | null {
+async function jwtDecodeCached(req: any): Promise<any | null> {
   if (req._jwtPayload) {
     return req._jwtPayload;
   }
@@ -91,8 +101,44 @@ function jwtDecodeCached(req: any): any | null {
     req._jwtPayload = info;
     return info;
   } catch {
+    const info = await resolveApiToken(req.headers.authorization);
+    if (info) {
+      req._jwtPayload = info;
+      return info;
+    }
     return null;
   }
+}
+
+/**
+ * Resolve an API token bearer credential to a user-backed payload.
+ * Permissions are read from the user record at resolution time, so
+ * role/scope changes apply to existing tokens immediately.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function resolveApiToken(authorizationHeader: string): Promise<any | null> {
+  const token = authorizationHeader.split(" ")[1];
+  if (!token) {
+    return null;
+  }
+  const span = tracer.startSpan("AuthResolveApiToken");
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  const apiToken = await UsersApiTokensDataGetByTokenHash(span, tokenHash);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let payload: any | null = null;
+  if (apiToken) {
+    const user = await UsersDataGet(span, apiToken.userId);
+    if (user) {
+      payload = {
+        userId: user.id,
+        userName: user.name,
+        role: user.role,
+        scopes: user.role === "admin" ? [...User.ALL_SCOPES] : user.scopes,
+      };
+    }
+  }
+  span.end();
+  return payload;
 }
 
 export async function AuthMustBeAuthenticated(
@@ -101,7 +147,7 @@ export async function AuthMustBeAuthenticated(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   res: any,
 ): Promise<void> {
-  if (!jwtDecodeCached(req)) {
+  if (!(await jwtDecodeCached(req))) {
     res.status(403).send({ error: "Access Denied" });
     throw new Error("Access Denied");
   }
@@ -109,7 +155,7 @@ export async function AuthMustBeAuthenticated(
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function AuthMustBeAdmin(req: any, res: any): Promise<void> {
-  const info = jwtDecodeCached(req);
+  const info = await jwtDecodeCached(req);
   if (info?.role === "admin") {
     return;
   }
@@ -124,7 +170,7 @@ export async function AuthHasScope(
   res: any,
   scope: UserScope,
 ): Promise<void> {
-  const info = jwtDecodeCached(req);
+  const info = await jwtDecodeCached(req);
   if (!info) {
     res.status(403).send({ error: "Access Denied" });
     throw new Error("Access Denied");
@@ -143,7 +189,7 @@ export async function AuthHasScope(
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function AuthGetUserSession(req: any): Promise<UserSession> {
   const userSession: UserSession = { isAuthenticated: false };
-  const info = jwtDecodeCached(req);
+  const info = await jwtDecodeCached(req);
   if (info) {
     userSession.userId = info.userId;
     userSession.userName = info.userName;
