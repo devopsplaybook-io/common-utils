@@ -105,4 +105,37 @@ describe("ConfigBase", () => {
     await config.reload();
     expect(config.DATABASE_TYPE).toBe("postgres");
   });
+
+  describe("VERSION detection", () => {
+    let cwdSpy: jest.SpyInstance;
+
+    afterEach(() => {
+      cwdSpy.mockRestore();
+    });
+
+    it("should detect VERSION from a package.json in the working directory", () => {
+      fse.writeJsonSync(path.join(tmpDir, "package.json"), {
+        name: "host-app",
+        version: "3.2.1",
+      });
+      cwdSpy = jest.spyOn(process, "cwd").mockReturnValue(tmpDir);
+      const config = new TestConfig(configPath);
+      expect(config.VERSION).toBe("3.2.1");
+    });
+
+    it("should fall back to VERSION '1' when the working directory has no package.json", () => {
+      cwdSpy = jest.spyOn(process, "cwd").mockReturnValue(tmpDir);
+      const config = new TestConfig(configPath);
+      expect(config.VERSION).toBe("1");
+    });
+
+    it("should fall back to VERSION '1' when package.json has no version field", () => {
+      fse.writeJsonSync(path.join(tmpDir, "package.json"), {
+        name: "host-app",
+      });
+      cwdSpy = jest.spyOn(process, "cwd").mockReturnValue(tmpDir);
+      const config = new TestConfig(configPath);
+      expect(config.VERSION).toBe("1");
+    });
+  });
 });

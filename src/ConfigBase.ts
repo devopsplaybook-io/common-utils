@@ -167,9 +167,13 @@ export abstract class ConfigBase implements ConfigCommonInterface {
     this.SERVICE_ID = serviceId;
     this.CONFIG_FILE = configFile || process.env.CONFIG_FILE || "config.json";
 
-    // Auto-detect version from nearest package.json
+    // Auto-detect the host application version from its package.json.
+    // Services run with their project root as the current working
+    // directory, so <cwd>/package.json is the host app's manifest.  The
+    // installed library's own package.json is deliberately not used: it
+    // would report the library version, not the service version.
     try {
-      const pkg = fse.readJsonSync(path.resolve(__dirname, "../package.json"));
+      const pkg = fse.readJsonSync(path.resolve(process.cwd(), "package.json"));
       if (pkg && pkg.version) {
         this.VERSION = pkg.version;
       }
