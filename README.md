@@ -607,13 +607,12 @@ jobs:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 ```
 
-And `.github/workflows/npm-upgrade.yml` for weekly dependency updates:
+And `.github/workflows/npm-upgrade.yml` for manual dependency upgrades (the weekly update of the shared devopsplaybook.io libraries is agent-driven — see the AGENTS.md of this repository — so no schedule trigger is used):
 
 ```yaml
 name: NPM Upgrade
 on:
-  schedule:
-    - cron: "0 6 * * 1" # Monday 6am UTC
+  workflow_dispatch:
 jobs:
   npm-upgrade:
     uses: devopsplaybook-io/common-utils/.github/workflows/reusable-npm-upgrade.yml@main

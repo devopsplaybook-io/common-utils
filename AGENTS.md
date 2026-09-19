@@ -36,13 +36,18 @@ src/
 .github/workflows/
   main-build.yml            # Caller: push to main -> reusable-npm-merge
   pr-check.yml              # Caller: PR to main -> reusable-npm-pr
-  npm-upgrade.yml           # Caller: weekly schedule -> reusable-npm-upgrade
   reusable-npm-merge.yml    # Lint + test + build + publish release to npm
   reusable-npm-pr.yml       # Lint + test + build + publish beta tag + comment PR
-  reusable-npm-upgrade.yml  # npm-check-updates + auto PR
+  reusable-npm-upgrade.yml  # npm-check-updates + auto PR (manual, workflow_call)
   reusable-pr-verify.yml    # Matrix Node.js + multi-platform Docker build -> beta-pr-<PR> and beta
   reusable-merge-build.yml  # Promotes the PR image to the version tags on merge (no build/lint/test)
 ```
+
+## Weekly Dependency Updates
+
+The scheduled `npm-upgrade.yml` caller was retired: it created dependency upgrade pull requests every week that no one merged. `reusable-npm-upgrade.yml` is kept for manual, on-demand upgrades (`workflow_call`; adopting repositories can trigger it through their own `workflow_dispatch` caller).
+
+The weekly update of the shared npm libraries is agent-driven instead: a Kubernetes CronJob (`planner-shared-libraries-update` in the `DidierHoarau/didier-home` GitOps repository) creates a Planner task in the `Projects/xMaintenance` project every Friday, and the planner-llm-agent executes the `update-shared-libraries` skill from `DidierHoarau/planner-llm-agent-config`. The skill updates `otel-utils` first, then `otel-utils-fastify` and `common-utils` once the freshly published `otel-utils` version is visible on npm, then the consumer repositories discovered with GitHub code search. It applies minor/patch updates only (majors are reported, never applied), skips repositories already current against the npm registry, and delivers one squash-merged pull request per repository after green checks. Do not reintroduce a scheduled upgrade workflow in this repository: it would compete with the agent-driven update.
 
 ## Key Conventions
 
