@@ -10,7 +10,6 @@ import { v4 as uuidv4 } from "uuid";
  */
 export class UserApiToken {
   //
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   public static fromJson(json: any): UserApiToken | null {
     if (!json) {
       return null;
@@ -34,7 +33,6 @@ export class UserApiToken {
     this.id = uuidv4();
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   public toJson(): any {
     return {
       id: this.id,
@@ -46,7 +44,6 @@ export class UserApiToken {
   }
 
   // Transport representation: never exposes the token hash.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   public toTransportJson(): any {
     return {
       id: this.id,

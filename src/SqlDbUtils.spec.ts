@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 
 // Mock dependencies before imports
 jest.mock("better-sqlite3", () => {
@@ -64,7 +63,6 @@ describe("SqlDbUtils", () => {
     jest.clearAllMocks();
     // Re-import to reset module state
     jest.isolateModules(() => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
       SqlDbUtils = require("./SqlDbUtils");
     });
     SqlDbUtils.SqlDbUtilsSetOTel(mockTracer as any, mockLogger as any);
@@ -77,7 +75,6 @@ describe("SqlDbUtils", () => {
   });
 
   it("SqlDbUtilsExecSQL should call prepare and run", () => {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const Database = require("better-sqlite3");
     const db = new Database("/tmp/test.db");
     const mockRun = jest.fn().mockReturnValue({ changes: 5 });

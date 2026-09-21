@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 
 // Mock pg before imports
 const mockQuery = jest.fn();
@@ -58,7 +57,6 @@ describe("PostgresDbUtils", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     jest.isolateModules(() => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
       PostgresDbUtils = require("./PostgresDbUtils");
     });
     PostgresDbUtils.PostgresDbUtilsSetOTel(

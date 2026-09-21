@@ -4,7 +4,6 @@ import {
   DbUtilsNoTelemetryQuerySQL,
 } from "./DbUtilsNoTelemetry";
 
-/* eslint-disable @typescript-eslint/no-unsafe-function-type */
 
 // Shared mock DB handle – defined BEFORE jest.mock factory so it's hoisted correctly.
 // We use jest.fn() at module scope; the mock factory captures the same reference.
@@ -38,11 +37,9 @@ beforeAll(() => {
     error: jest.fn(),
     info: jest.fn(),
     warn: jest.fn(),
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
   DbUtilsNoTelemetryModule.DbUtilsNoTelemetrySetLogger({
     createModuleLogger: () => mockLogger,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any);
 });
 
@@ -62,7 +59,6 @@ describe("DbUtilsNoTelemetryBatchInsert", () => {
     mockPrepare.mockReturnValue({
       run: jest.fn().mockReturnValue({ changes: 2 }),
       all: jest.fn(),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     const rows = [
@@ -83,7 +79,6 @@ describe("DbUtilsNoTelemetryExecSQL (sqlite)", () => {
     mockPrepare.mockReturnValue({
       run: jest.fn().mockReturnValue({ changes: 3 }),
       all: jest.fn(),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     const result = DbUtilsNoTelemetryExecSQL("INSERT INTO t (c) VALUES (?)", [
@@ -135,7 +130,6 @@ describe("DbUtilsNoTelemetryQuerySQL (sqlite)", () => {
     mockPrepare.mockReturnValue({
       run: jest.fn(),
       all: jest.fn().mockReturnValue(expectedRows),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     const result = DbUtilsNoTelemetryQuerySQL("SELECT * FROM t");

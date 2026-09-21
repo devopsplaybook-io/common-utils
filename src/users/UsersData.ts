@@ -109,7 +109,6 @@ export async function UsersDataDelete(
 
 // Private Functions
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function fromRaw(userRaw: any): User {
   const user = new User();
   user.id = userRaw.id;

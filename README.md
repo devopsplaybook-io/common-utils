@@ -498,7 +498,7 @@ The `.github/workflows/` directory contains **reusable workflows** that other re
 
 | Input              | Required | Default | Description                                               |
 | ------------------ | -------- | ------- | --------------------------------------------------------- |
-| `node_version`     | No       | `"18"`  | Node.js version                                           |
+| `node_version`     | No       | `"22"`  | Node.js version                                           |
 | `npm_package_name` | Yes      | --      | npm package name (e.g. `@devopsplaybook.io/common-utils`) |
 
 | Secret                    | Required | Description                               |
@@ -630,7 +630,7 @@ jobs:
 ```bash
 npm install
 npm run build    # TypeScript compilation -> dist/
-npm run lint     # ESLint (strict + stylistic)
+npm run lint     # oxlint (recommended preset)
 npm run test     # Jest with coverage
 ```
 

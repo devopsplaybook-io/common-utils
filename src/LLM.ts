@@ -159,7 +159,6 @@ export class LLMClient {
     }
 
     const model = options?.model || this.model;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const body: Record<string, any> = {
       model,
       messages,
@@ -195,7 +194,6 @@ export class LLMClient {
    */
   private extractErrorMessage(err: unknown): string {
     if (axios.isAxiosError(err)) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const providerMessage = (err.response?.data as any)?.error?.message;
       if (providerMessage) {
         return providerMessage;

@@ -133,7 +133,6 @@ export function SqlDbUtilsQuerySQL(
   sql: string,
   params: unknown[] = [],
   debug = false,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): any[] {
   const span = tracer.startSpan("SqlDbUtilsQuerySQL", context);
   if (debug) {
