@@ -11,6 +11,7 @@ jobs:
     uses: devopsplaybook-io/common-utils/.github/workflows/reusable-npm-merge.yml@main
     with:
       npm_package_name: "@devopsplaybook.io/common-utils"
+      node_version: "22"
     secrets:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       QUALITY_DASHBOARD_URL: ${{ secrets.QUALITY_DASHBOARD_URL }}

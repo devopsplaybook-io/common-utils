@@ -19,7 +19,6 @@ export class User {
   /** Full scope set of the host application, registered via `AuthInit`. */
   public static ALL_SCOPES: UserScope[] = [];
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   public static fromJson(json: any): User | null {
     if (!json) {
       return null;
@@ -55,7 +54,6 @@ export class User {
     this.id = uuidv4();
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   public toJson(): any {
     return {
       id: this.id,
@@ -66,7 +64,6 @@ export class User {
     };
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   public toTransportJson(): any {
     return {
       id: this.id,

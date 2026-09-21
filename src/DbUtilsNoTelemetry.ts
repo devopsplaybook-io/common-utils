@@ -24,7 +24,6 @@ export function DbUtilsNoTelemetrySetLogger(loggerIn: StandardLogger): void {
 export function DbUtilsNoTelemetryBatchInsert(
   tableCols: string,
   numCols: number,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   rows: any[][],
 ): number | Promise<number> {
   if (rows.length === 0) return 0;
@@ -50,7 +49,6 @@ export function DbUtilsNoTelemetryExecSQL(
   if (dbType === "postgres") {
     const pgSql = convertToPostgresPlaceholders(sql);
     return new Promise((resolve, reject) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (DbUtilsGetDatabase() as any).query(
         pgSql,
         params,
@@ -87,7 +85,6 @@ export function DbUtilsNoTelemetryQuerySQL(
   sql: string,
   params: unknown[] = [],
   debug = false,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): any[] | Promise<any[]> {
   if (debug) {
     console.log(sql);
@@ -96,7 +93,6 @@ export function DbUtilsNoTelemetryQuerySQL(
   if (dbType === "postgres") {
     const pgSql = convertToPostgresPlaceholders(sql);
     return new Promise((resolve, reject) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (DbUtilsGetDatabase() as any).query(
         pgSql,
         params,

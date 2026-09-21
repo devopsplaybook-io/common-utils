@@ -181,7 +181,6 @@ export class PostgresSchemaDbUtils {
   execSQL(
     context: Span,
     sql: string,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     params: any[] = [],
     useSchemaPool = false,
   ): Promise<number> {
@@ -257,10 +256,8 @@ export class PostgresSchemaDbUtils {
   querySQL(
     context: Span,
     sql: string,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     params: any[] = [],
     useSchemaPool = false,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ): Promise<any[]> {
     const span = tracer.startSpan("PostgresSchemaDbUtilsQuerySQL", context);
     const pool = useSchemaPool ? this.schemaPool : this.runtimePool;
@@ -300,7 +297,6 @@ export class PostgresSchemaDbUtils {
    */
   async transaction(
     context: Span,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     callback: (client: any) => Promise<void>,
     useSchemaPool = false,
   ): Promise<void> {
@@ -370,7 +366,6 @@ export class PostgresSchemaDbUtils {
   private execSQLForSchema(
     context: Span,
     sql: string,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     params: any[] = [],
   ): Promise<void> {
     const span = tracer.startSpan(
@@ -383,7 +378,6 @@ export class PostgresSchemaDbUtils {
     }
 
     return new Promise((resolve, reject) => {
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
       this.schemaPool!.query(sql, params, (error: Error | null) => {
         span.end();
         if (error) {
@@ -411,11 +405,9 @@ export class PostgresSchemaDbUtils {
       }
 
       return new Promise((resolve, reject) => {
-        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
         this.schemaPool!.query(sql, (error: Error | null) => {
           span.end();
           if (error) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             if ((error as any).code === "ENOENT") {
               resolve();
             } else {
@@ -427,7 +419,6 @@ export class PostgresSchemaDbUtils {
         });
       });
     } catch (error) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       if ((error as any).code === "ENOENT") {
         return;
       }
@@ -438,9 +429,7 @@ export class PostgresSchemaDbUtils {
   private querySQLForSchema(
     context: Span,
     sql: string,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     params: any[] = [],
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ): Promise<any[]> {
     const span = tracer.startSpan(
       "PostgresSchemaDbUtilsQuerySQLForSchema",
@@ -452,7 +441,6 @@ export class PostgresSchemaDbUtils {
     }
 
     return new Promise((resolve, reject) => {
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
       this.schemaPool!.query(
         sql,
         params,
@@ -616,7 +604,6 @@ export function PostgresDbUtilsQuerySQL(
   sql: string,
   params: unknown[] = [],
   debug = false,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Promise<any[]> {
   const span = tracer.startSpan("PostgresDbUtilsQuerySQL", context);
   if (debug) {

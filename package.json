@@ -1,6 +1,6 @@
 {
   "name": "@devopsplaybook.io/common-utils",
-  "version": "1.9.2",
+  "version": "1.10.0",
   "description": "Shared utility modules for devopsplaybook.io projects (DB, Config, OTel context, auth/users, notifications, LLM, system helpers)",
   "keywords": [
     "Open Telemetry",
@@ -21,8 +21,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
-    "lint": "eslint src",
+    "build": "tsc && tsc -p tsconfig.spec.json --noEmit",
+    "lint": "oxlint src",
     "test": "jest --coverage"
   },
   "dependencies": {
@@ -39,7 +39,8 @@
     "uuid": "^14.0.2"
   },
   "devDependencies": {
-    "@eslint/js": "^10.0.1",
+    "@swc/core": "^1.16.2",
+    "@swc/jest": "^0.2.39",
     "@types/bcrypt": "^6.0.0",
     "@types/better-sqlite3": "^9.6.0",
     "@types/fs-extra": "^11.0.4",
@@ -48,12 +49,9 @@
     "@types/node": "^26.6.2",
     "@types/pg": "^8.23.1",
     "@types/uuid": "^11.0.0",
-    "eslint": "^10.11.0",
     "jest": "^30.5.2",
-    "ts-jest": "^29.4.12",
-    "ts-node": "^10.9.2",
-    "typescript": "^6.0.3",
-    "typescript-eslint": "^8.70.0"
+    "oxlint": "^1.83.0",
+    "typescript": "^7.0.2"
   },
   "publishConfig": {
     "access": "public"

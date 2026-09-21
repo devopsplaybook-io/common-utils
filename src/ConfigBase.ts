@@ -59,7 +59,6 @@ export interface ConfigCommonInterface
  * array → JSON.parse, etc.).  When the default is already a string or
  * there is no default, the original string is returned as-is.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function coerceValue(value: string, defaultValue: any): any {
   if (defaultValue === undefined || defaultValue === null) {
     return value;
@@ -155,7 +154,6 @@ export abstract class ConfigBase implements ConfigCommonInterface {
     field: string;
     sensitive: boolean;
     envAliases: string[];
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     defaultValue: any;
   }[] = [];
 
@@ -173,7 +171,7 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       if (pkg && pkg.version) {
         this.VERSION = pkg.version;
       }
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      // eslint-disable-next-line no-unused-vars -- catch binding kept so dist/ stays byte-identical to the TS6 build
     } catch (_e) {
       // fallback to "1"
     }
@@ -224,7 +222,6 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       field: def.field,
       sensitive: def.sensitive ?? false,
       envAliases: def.envAliases ?? [],
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       defaultValue: (this as any)[def.field],
     });
   }
@@ -237,12 +234,11 @@ export abstract class ConfigBase implements ConfigCommonInterface {
    *                When omitted nothing is logged (useful in tests).
    */
   public async reload(logger?: (message: string) => void): Promise<void> {
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
     const log = logger ?? (() => {});
     let content: Record<string, unknown> = {};
     try {
       content = await fse.readJson(this.CONFIG_FILE);
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      // eslint-disable-next-line no-unused-vars -- catch binding kept so dist/ stays byte-identical to the TS6 build
     } catch (_e) {
       // config file is optional – fall back to env + defaults
     }
@@ -277,14 +273,12 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       // 3. Apply environment value (full name or alias) if found,
       //    coercing strings to match the default value type
       if (foundValue !== undefined) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (this as any)[field] = coerceValue(foundValue, defaultValue);
       }
 
       // 4. Config file override (environment always wins, but if neither
       //    environment nor alias matched, check config file)
       if (foundValue === undefined && content[field] !== undefined) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (this as any)[field] = content[field];
         from = "config";
       }
@@ -295,7 +289,6 @@ export abstract class ConfigBase implements ConfigCommonInterface {
         );
       } else {
         log(
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           `Configuration Value: ${field}: ${(this as any)[field]} (from ${from}${usedAlias ? ` via alias` : ""})`,
         );
       }

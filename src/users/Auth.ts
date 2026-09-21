@@ -85,7 +85,6 @@ export async function AuthGenerateJWT(user: User): Promise<string> {
  * mirroring the owning user's live role and scopes is built (valid until
  * the token is revoked).
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function jwtDecodeCached(req: any): Promise<any | null> {
   if (req._jwtPayload) {
     return req._jwtPayload;
@@ -115,7 +114,6 @@ async function jwtDecodeCached(req: any): Promise<any | null> {
  * Permissions are read from the user record at resolution time, so
  * role/scope changes apply to existing tokens immediately.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function resolveApiToken(authorizationHeader: string): Promise<any | null> {
   const token = authorizationHeader.split(" ")[1];
   if (!token) {
@@ -124,7 +122,6 @@ async function resolveApiToken(authorizationHeader: string): Promise<any | null>
   const span = tracer.startSpan("AuthResolveApiToken");
   const tokenHash = createHash("sha256").update(token).digest("hex");
   const apiToken = await UsersApiTokensDataGetByTokenHash(span, tokenHash);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let payload: any | null = null;
   if (apiToken) {
     const user = await UsersDataGet(span, apiToken.userId);
@@ -142,9 +139,7 @@ async function resolveApiToken(authorizationHeader: string): Promise<any | null>
 }
 
 export async function AuthMustBeAuthenticated(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   req: any,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   res: any,
 ): Promise<void> {
   if (!(await jwtDecodeCached(req))) {
@@ -153,7 +148,6 @@ export async function AuthMustBeAuthenticated(
   }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function AuthMustBeAdmin(req: any, res: any): Promise<void> {
   const info = await jwtDecodeCached(req);
   if (info?.role === "admin") {
@@ -164,9 +158,7 @@ export async function AuthMustBeAdmin(req: any, res: any): Promise<void> {
 }
 
 export async function AuthHasScope(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   req: any,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   res: any,
   scope: UserScope,
 ): Promise<void> {
@@ -186,7 +178,6 @@ export async function AuthHasScope(
   throw new Error("Access Denied");
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function AuthGetUserSession(req: any): Promise<UserSession> {
   const userSession: UserSession = { isAuthenticated: false };
   const info = await jwtDecodeCached(req);

@@ -53,7 +53,6 @@ export async function DbUtilsInit(
  * - SQLite: `better-sqlite3` `Database` instance
  * - Postgres: `pg` `Pool` instance
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function DbUtilsGetDatabase(): any {
   if (databaseType === "postgres") {
     return PostgresDbUtils.PostgresDbUtilsGetPool();
@@ -99,7 +98,6 @@ export function DbUtilsQuerySQL(
   sql: string,
   params: unknown[] = [],
   debug = false,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): any[] | Promise<any[]> {
   if (databaseType === "postgres") {
     return PostgresDbUtils.PostgresDbUtilsQuerySQL(

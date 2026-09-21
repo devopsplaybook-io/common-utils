@@ -20,7 +20,6 @@ export interface OTelContext {
    * Retrieves the span previously attached to a request object.
    * Equivalent to `req.tracerSpanApi`.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   OTelRequestSpan: (req: any) => Span | undefined;
 }
 
@@ -59,7 +58,6 @@ export function createOTelContext(): OTelContext {
       }
       return logger;
     },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     OTelRequestSpan: (req: any) => req?.tracerSpanApi as Span | undefined,
   };
 }

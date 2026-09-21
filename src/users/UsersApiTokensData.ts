@@ -100,7 +100,6 @@ export async function UsersApiTokensDataDeleteByUser(
 
 // Private Functions
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function fromRaw(tokenRaw: any): UserApiToken {
   const apiToken = new UserApiToken();
   apiToken.id = tokenRaw.id;

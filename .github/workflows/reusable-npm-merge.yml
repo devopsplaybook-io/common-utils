@@ -7,7 +7,7 @@ on:
         description: "Node.js version to use"
         required: false
         type: string
-        default: "18"
+        default: "22"
       npm_package_name:
         description: "NPM package name (e.g. @devopsplaybook.io/otel-utils)"
         required: true

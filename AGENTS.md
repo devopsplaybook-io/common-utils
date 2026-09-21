@@ -52,8 +52,8 @@ The weekly update of the shared npm libraries is agent-driven instead: a Kuberne
 ## Key Conventions
 
 - **TypeScript**: Target ES2019, CommonJS output, strict mode enabled, declarations generated.
-- **ESLint**: Uses `typescript-eslint` with `strict` and `stylistic` rule sets. Minimize `eslint-disable` comments; use them only when the type system cannot express the constraint (e.g., `@typescript-eslint/no-explicit-any` for `this as any` dynamic field access in `ConfigBase`).
-- **Tests**: Jest with `ts-jest`. Spec files live next to source (`*.spec.ts`). Run with `npm run test`. The `tsconfig.spec.json` includes jest types.
+- **Linting**: Uses `oxlint` with its default **recommended** preset. Minimize disable comments (`eslint-disable`-style comments are honored by oxlint); use them only when the rule cannot be satisfied (e.g. `no-explicit-any` is not enabled by the recommended preset, so `any` needs no directive).
+- **Tests**: Jest with `@swc/jest` transform (`jsc.target` matches tsconfig ES2019) and `v8` coverage provider. Spec files live next to source (`*.spec.ts`). Run with `npm run test`. The `tsconfig.spec.json` includes jest types; `npm run build` also type-checks specs (`tsc -p tsconfig.spec.json --noEmit`).
 - **No default exports**: All modules use named exports only.
 - **OTel dependency injection**: Every DB module exposes a `*SetOTel(tracer, logger)` function that must be called before `*Init()`. OTel instances are stored as module-level singletons.
 - **Auth modules**: `AuthSetOTel(tracer)` and `UsersDataSetOTel(tracer)` must be called before `AuthInit`. Application scopes are registered through `AuthInit(context, config, allScopes)`; `UsersRoutes` relies on `req.tracerSpanApi` set by the `otel-utils-fastify` hooks.
@@ -68,7 +68,7 @@ The weekly update of the shared npm libraries is agent-driven instead: a Kuberne
 ```bash
 npm install
 npm run build    # tsc -> dist/
-npm run lint     # eslint src (must pass with 0 errors)
+npm run lint     # oxlint src (must pass with 0 errors)
 npm run test     # jest --coverage (all tests must pass)
 ```
 
@@ -91,7 +91,7 @@ All three commands must pass before committing. The CI pipeline (`reusable-npm-m
 
 - **uuid ESM**: `uuid` v14+ ships ESM. In any test that transitively imports `uuid`, add `jest.mock("uuid", () => ({ v4: () => "mock-uuid-1234" }))` to avoid `SyntaxError: Unexpected token 'export'`.
 - **better-sqlite3 is synchronous**: `SqlDbUtils` functions return values directly (not Promises). `PostgresDbUtils` functions return Promises. The `DbUtils` facade returns `number | Promise<number>` depending on the active backend.
-- **eslint-disable placement**: `eslint-disable-next-line` applies to the **immediately following line only**. When disabling a rule inside a function call argument, place the comment directly before the offending expression, not before the function call.
+- **Disable-comment placement**: `eslint-disable-next-line` applies to the **immediately following line only** (oxlint honors these comments too). When disabling a rule inside a function call argument, place the comment directly before the offending expression, not before the function call.
 - **pg callback typing**: Always explicitly type pg callback parameters: `(error: Error | null, result: { rowCount: number | null })`. TypeScript cannot infer these from the overloaded `pool.query` signature.
 
 ## Adopting in Other Projects
