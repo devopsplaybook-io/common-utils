@@ -1,6 +1,6 @@
 {
   "name": "@devopsplaybook.io/common-utils",
-  "version": "1.10.1",
+  "version": "1.11.0",
   "description": "Shared utility modules for devopsplaybook.io projects (DB, Config, OTel context, auth/users, notifications, LLM, system helpers)",
   "keywords": [
     "Open Telemetry",
@@ -20,6 +20,63 @@
   "type": "commonjs",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json",
+    "./otel": {
+      "types": "./dist/src/OTelContext.d.ts",
+      "default": "./dist/src/OTelContext.js"
+    },
+    "./config": {
+      "types": "./dist/src/ConfigBase.d.ts",
+      "default": "./dist/src/ConfigBase.js"
+    },
+    "./db": {
+      "types": "./dist/src/DbUtils.d.ts",
+      "default": "./dist/src/DbUtils.js"
+    },
+    "./db/sqlite": {
+      "types": "./dist/src/SqlDbUtils.d.ts",
+      "default": "./dist/src/SqlDbUtils.js"
+    },
+    "./db/postgres": {
+      "types": "./dist/src/PostgresDbUtils.d.ts",
+      "default": "./dist/src/PostgresDbUtils.js"
+    },
+    "./db/no-telemetry": {
+      "types": "./dist/src/DbUtilsNoTelemetry.d.ts",
+      "default": "./dist/src/DbUtilsNoTelemetry.js"
+    },
+    "./users": {
+      "types": "./dist/src/users/index.d.ts",
+      "default": "./dist/src/users/index.js"
+    },
+    "./notifications": {
+      "types": "./dist/src/Notifications.d.ts",
+      "default": "./dist/src/Notifications.js"
+    },
+    "./llm": {
+      "types": "./dist/src/LLM.d.ts",
+      "default": "./dist/src/LLM.js"
+    },
+    "./system": {
+      "types": "./dist/src/SystemCommand.d.ts",
+      "default": "./dist/src/SystemCommand.js"
+    },
+    "./timeout": {
+      "types": "./dist/src/Timeout.d.ts",
+      "default": "./dist/src/Timeout.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc && tsc -p tsconfig.spec.json --noEmit",
     "lint": "oxlint src",

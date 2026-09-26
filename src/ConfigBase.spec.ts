@@ -7,6 +7,7 @@ jest.mock("uuid", () => ({
 }));
 
 import { ConfigBase } from "./ConfigBase";
+import { DbUtilsInit } from "./DbUtils";
 
 /** Concrete subclass for testing. */
 class TestConfig extends ConfigBase {
@@ -36,6 +37,12 @@ describe("ConfigBase", () => {
     delete process.env.SECRET_KEY;
     delete process.env.LOG_LEVEL;
     delete process.env.DATA_DIR;
+    delete process.env.VERSION;
+    delete process.env.SERVICE_ID;
+    delete process.env.API_PORT;
+    delete process.env.DATABASE_POSTGRES_PORT;
+    delete process.env.DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS;
+    delete process.env.OPENTELEMETRY_COLLECTOR_AWS;
   });
 
   it("should initialise with default values", () => {
@@ -104,5 +111,69 @@ describe("ConfigBase", () => {
     const config = new TestConfig(configPath);
     await config.reload();
     expect(config.DATABASE_TYPE).toBe("postgres");
+  });
+
+  it("should report the library version from its own package.json", () => {
+    const config = new TestConfig(configPath);
+    const pkg = fse.readJsonSync(path.resolve(__dirname, "../package.json"));
+    expect(pkg.name).toBe("@devopsplaybook.io/common-utils");
+    expect(config.VERSION).toBe(pkg.version);
+  });
+
+  it("should allow overriding VERSION and SERVICE_ID from the environment", async () => {
+    process.env.VERSION = "9.9.9";
+    process.env.SERVICE_ID = "other-service";
+    const config = new TestConfig(configPath);
+    await config.reload();
+    expect(config.VERSION).toBe("9.9.9");
+    expect(config.SERVICE_ID).toBe("other-service");
+  });
+
+  it("should allow overriding VERSION and SERVICE_ID from the config file", async () => {
+    fse.writeJsonSync(configPath, {
+      VERSION: "8.8.8",
+      SERVICE_ID: "file-service",
+    });
+    const config = new TestConfig(configPath);
+    await config.reload();
+    expect(config.VERSION).toBe("8.8.8");
+    expect(config.SERVICE_ID).toBe("file-service");
+  });
+
+  it("should coerce config-file string values to the default value type", async () => {
+    fse.writeJsonSync(configPath, {
+      API_PORT: "9090",
+      DATABASE_POSTGRES_PORT: "5433",
+      DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS: "30000",
+      OPENTELEMETRY_COLLECTOR_AWS: "true",
+    });
+    const config = new TestConfig(configPath);
+    await config.reload();
+    expect(config.API_PORT).toBe(9090);
+    expect(config.DATABASE_POSTGRES_PORT).toBe(5433);
+    expect(config.DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS).toBe(30000);
+    expect(config.OPENTELEMETRY_COLLECTOR_AWS).toBe(true);
+  });
+
+  it("should keep already-typed config-file values unchanged", async () => {
+    fse.writeJsonSync(configPath, { API_PORT: 7070 });
+    const config = new TestConfig(configPath);
+    await config.reload();
+    expect(config.API_PORT).toBe(7070);
+    expect(Number.isInteger(config.API_PORT)).toBe(true);
+  });
+
+  it("should disable the Postgres pool timeouts by default", () => {
+    const config = new TestConfig(configPath);
+    expect(config.DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS).toBe(0);
+    expect(config.DATABASE_POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS).toBe(0);
+  });
+
+  it("should reject an unsupported DATABASE_TYPE at database init", async () => {
+    const config = new TestConfig(configPath);
+    (config as any).DATABASE_TYPE = "mysql";
+    await expect(
+      DbUtilsInit(undefined as never, config as never, "/sql"),
+    ).rejects.toThrow('Invalid DATABASE_TYPE: mysql');
   });
 });

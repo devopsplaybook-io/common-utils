@@ -8,6 +8,36 @@ import {
 let logger: ModuleLogger;
 
 /**
+ * Compiled SQLite statements are cached per database handle: `better-sqlite3`
+ * has no internal cache and `prepare()` dominates the ingestion hot path.
+ */
+const PREPARED_STATEMENT_CACHE_MAX = 100;
+const statementCaches = new WeakMap<object, Map<string, any>>();
+
+function prepareCached(db: object, sql: string): any {
+  let cache = statementCaches.get(db);
+  if (!cache) {
+    cache = new Map<string, any>();
+    statementCaches.set(db, cache);
+  }
+  let statement = cache.get(sql);
+  if (!statement) {
+    if (cache.size >= PREPARED_STATEMENT_CACHE_MAX) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) {
+        cache.delete(oldest);
+      }
+    }
+    statement = (db as { prepare: (sql: string) => any }).prepare(sql);
+    cache.set(sql, statement);
+  }
+  return statement;
+}
+
+/** Maximum number of bound parameters per statement on each backend. */
+const PARAMS_PER_STATEMENT = { postgres: 65535, sqlite: 32766 };
+
+/**
  * Injects the OTel logger instance used by no-telemetry DB operations.
  * Must be called once at startup.
  */
@@ -19,7 +49,10 @@ export function DbUtilsNoTelemetrySetLogger(loggerIn: StandardLogger): void {
  * Execute a multi-row INSERT with a flat parameter array.
  * Builds: INSERT INTO <tableCols> VALUES (?,?...),(?,?...),...
  *
- * @returns Number of rows inserted.
+ * Large inputs are chunked so the statement never exceeds the backend's
+ * bound-parameter limit (65535 on Postgres, 32766 on SQLite).
+ *
+ * @returns Number of rows inserted (summed across chunks).
  */
 export function DbUtilsNoTelemetryBatchInsert(
   tableCols: string,
@@ -27,12 +60,57 @@ export function DbUtilsNoTelemetryBatchInsert(
   rows: any[][],
 ): number | Promise<number> {
   if (rows.length === 0) return 0;
-  const rowSQL = `(${Array.from({ length: numCols }, () => "?").join(",")})`;
-  const multiValues = Array.from({ length: rows.length }, () => rowSQL).join(
-    ",",
+  const dbType = DbUtilsGetType();
+  const maxRowsPerChunk = Math.max(
+    1,
+    Math.floor(PARAMS_PER_STATEMENT[dbType] / Math.max(1, numCols)),
   );
-  const sql = `INSERT ${tableCols} VALUES ${multiValues}`;
-  return DbUtilsNoTelemetryExecSQL(sql, rows.flat());
+  if (rows.length <= maxRowsPerChunk) {
+    return DbUtilsNoTelemetryExecSQL(
+      buildBatchInsertSQL(tableCols, numCols, rows.length),
+      rows.flat(),
+    );
+  }
+  const chunks: any[][][] = [];
+  for (let i = 0; i < rows.length; i += maxRowsPerChunk) {
+    chunks.push(rows.slice(i, i + maxRowsPerChunk));
+  }
+  if (dbType === "postgres") {
+    return execChunksSequentially(chunks, tableCols, numCols);
+  }
+  let total = 0;
+  for (const chunk of chunks) {
+    total += DbUtilsNoTelemetryExecSQL(
+      buildBatchInsertSQL(tableCols, numCols, chunk.length),
+      chunk.flat(),
+    ) as number;
+  }
+  return total;
+}
+
+function buildBatchInsertSQL(
+  tableCols: string,
+  numCols: number,
+  rowCount: number,
+): string {
+  const rowSQL = `(${Array.from({ length: numCols }, () => "?").join(",")})`;
+  const multiValues = Array.from({ length: rowCount }, () => rowSQL).join(",");
+  return `INSERT ${tableCols} VALUES ${multiValues}`;
+}
+
+async function execChunksSequentially(
+  chunks: any[][][],
+  tableCols: string,
+  numCols: number,
+): Promise<number> {
+  let total = 0;
+  for (const chunk of chunks) {
+    total += (await DbUtilsNoTelemetryExecSQL(
+      buildBatchInsertSQL(tableCols, numCols, chunk.length),
+      chunk.flat(),
+    )) as number;
+  }
+  return total;
 }
 
 /**
@@ -64,13 +142,8 @@ export function DbUtilsNoTelemetryExecSQL(
     });
   }
   // SQLite (better-sqlite3) – synchronous
-  const stmt = (
-    DbUtilsGetDatabase() as {
-      prepare: (sql: string) => {
-        run: (params: unknown[]) => { changes: number };
-      };
-    }
-  ).prepare(sql);
+  const db = DbUtilsGetDatabase();
+  const stmt = prepareCached(db, sql);
   const result = stmt.run(params);
   return result.changes;
 }
@@ -108,10 +181,6 @@ export function DbUtilsNoTelemetryQuerySQL(
     });
   }
   // SQLite (better-sqlite3) – synchronous
-  const stmt = (
-    DbUtilsGetDatabase() as {
-      prepare: (sql: string) => { all: (params: unknown[]) => unknown[] };
-    }
-  ).prepare(sql);
+  const stmt = prepareCached(DbUtilsGetDatabase(), sql);
   return stmt.all(params);
 }

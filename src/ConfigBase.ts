@@ -37,6 +37,10 @@ export interface ConfigDatabaseInterface {
   DATABASE_POSTGRES_USER: string;
   DATABASE_POSTGRES_PASSWORD: string;
   DATABASE_POSTGRES_DATABASE: string;
+  /** Per-session `statement_timeout` in ms (0 = disabled). */
+  DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS: number;
+  /** Per-session `idle_in_transaction_session_timeout` in ms (0 = disabled). */
+  DATABASE_POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS: number;
 }
 
 /**
@@ -47,6 +51,8 @@ export interface ConfigCommonInterface
   CONFIG_FILE: string;
   API_PORT: number;
   JWT_VALIDITY_DURATION: number;
+  JWT_REVOCATION_ENABLED: boolean;
+  API_TOKENS_MAX_PER_USER: number;
   CORS_POLICY_ORIGIN: string;
   DATA_DIR: string;
   JWT_KEY: string;
@@ -54,12 +60,16 @@ export interface ConfigCommonInterface
 }
 
 /**
- * Coerce a string value read from an environment variable to match the
- * type of the default value (number → parseFloat, boolean → "true"/"1",
- * array → JSON.parse, etc.).  When the default is already a string or
- * there is no default, the original string is returned as-is.
+ * Coerce a value read from an environment variable (always a string) or from
+ * the config file to match the type of the default value (number →
+ * parseFloat, boolean → "true"/"1", array → JSON.parse, etc.).  Values that
+ * are already typed correctly (config file JSON) pass through unchanged; when
+ * the default is a string or there is no default, the value is returned as-is.
  */
-function coerceValue(value: string, defaultValue: any): any {
+function coerceValue(value: unknown, defaultValue: any): any {
+  if (typeof value !== "string") {
+    return value;
+  }
   if (defaultValue === undefined || defaultValue === null) {
     return value;
   }
@@ -133,6 +143,14 @@ export abstract class ConfigBase implements ConfigCommonInterface {
   public CONFIG_FILE: string;
   public API_PORT = 8080;
   public JWT_VALIDITY_DURATION = 3 * 31 * 24 * 3600;
+  /**
+   * Opt-in JWT revocation: when enabled, every JWT request re-reads the user
+   * and rejects tokens whose `tokenVersion` claim is stale. Requires the
+   * `users.tokenVersion` migration (see README).
+   */
+  public JWT_REVOCATION_ENABLED = false;
+  /** Maximum number of API tokens a single user may create. */
+  public API_TOKENS_MAX_PER_USER = 100;
   public CORS_POLICY_ORIGIN = "";
   public DATA_DIR = process.env.DATA_DIR || "/data";
   public JWT_KEY: string = uuidv4();
@@ -145,6 +163,16 @@ export abstract class ConfigBase implements ConfigCommonInterface {
   public DATABASE_POSTGRES_USER = "";
   public DATABASE_POSTGRES_PASSWORD = "";
   public DATABASE_POSTGRES_DATABASE = "";
+  /**
+   * Per-session `statement_timeout` applied to every Postgres pool.
+   * `0` (default) disables the timeout, preserving the historical behaviour.
+   */
+  public DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS = 0;
+  /**
+   * Per-session `idle_in_transaction_session_timeout` applied to every
+   * Postgres pool. `0` (default) disables the timeout.
+   */
+  public DATABASE_POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS = 0;
 
   /**
    * Fields registered by subclasses (or the base) that {@link reload}
@@ -164,21 +192,16 @@ export abstract class ConfigBase implements ConfigCommonInterface {
   constructor(serviceId: string, configFile?: string) {
     this.SERVICE_ID = serviceId;
     this.CONFIG_FILE = configFile || process.env.CONFIG_FILE || "config.json";
-
-    // Auto-detect version from nearest package.json
-    try {
-      const pkg = fse.readJsonSync(path.resolve(__dirname, "../package.json"));
-      if (pkg && pkg.version) {
-        this.VERSION = pkg.version;
-      }
-      // eslint-disable-next-line no-unused-vars -- catch binding kept so dist/ stays byte-identical to the TS6 build
-    } catch (_e) {
-      // fallback to "1"
-    }
+    this.VERSION = ConfigBase.detectVersion();
 
     // Pre-register base + DB + OTel fields so reload() handles them
     const baseFields: ConfigFieldDef[] = [
+      { field: "VERSION" },
+      { field: "SERVICE_ID" },
+      { field: "API_PORT" },
       { field: "JWT_VALIDITY_DURATION" },
+      { field: "JWT_REVOCATION_ENABLED" },
+      { field: "API_TOKENS_MAX_PER_USER" },
       { field: "CORS_POLICY_ORIGIN" },
       { field: "DATA_DIR" },
       { field: "JWT_KEY", sensitive: true },
@@ -193,6 +216,8 @@ export abstract class ConfigBase implements ConfigCommonInterface {
         envAliases: ["POSTGRES_PASSWORD"],
       },
       { field: "DATABASE_POSTGRES_DATABASE", envAliases: ["POSTGRES_DB"] },
+      { field: "DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS" },
+      { field: "DATABASE_POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS" },
       { field: "OPENTELEMETRY_COLLECTOR_HTTP_TRACES" },
       { field: "OPENTELEMETRY_COLLECTOR_HTTP_METRICS" },
       { field: "OPENTELEMETRY_COLLECTOR_HTTP_LOGS" },
@@ -211,6 +236,29 @@ export abstract class ConfigBase implements ConfigCommonInterface {
     for (const f of baseFields) {
       this.addConfigField(f);
     }
+  }
+
+  /**
+   * Resolve the library's own version from its published manifest.
+   * `dist/src/ConfigBase.js` ships next to `../../package.json`; when running
+   * from the TypeScript sources the manifest is at `../package.json`. Falls
+   * back to `"1"` when neither resolves to this package.
+   */
+  private static detectVersion(): string {
+    for (const candidate of [
+      path.resolve(__dirname, "../../package.json"),
+      path.resolve(__dirname, "../package.json"),
+    ]) {
+      try {
+        const pkg = fse.readJsonSync(candidate);
+        if (pkg && pkg.name === "@devopsplaybook.io/common-utils" && pkg.version) {
+          return pkg.version;
+        }
+      } catch {
+        // try the next candidate
+      }
+    }
+    return "1";
   }
 
   /**
@@ -279,7 +327,7 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       // 4. Config file override (environment always wins, but if neither
       //    environment nor alias matched, check config file)
       if (foundValue === undefined && content[field] !== undefined) {
-        (this as any)[field] = content[field];
+        (this as any)[field] = coerceValue(content[field], defaultValue);
         from = "config";
       }
 

@@ -24,11 +24,13 @@ jobs:
 
       - name: Resolve branch name
         id: branch
+        env:
+          PR_BRANCH: ${{ inputs.pr_branch }}
         run: |
-          if [ -n "${{ inputs.pr_branch }}" ]; then
-            echo "name=${{ inputs.pr_branch }}" >> $GITHUB_OUTPUT
+          if [ -n "${PR_BRANCH}" ]; then
+            echo "name=${PR_BRANCH}" >> "$GITHUB_OUTPUT"
           else
-            echo "name=feature/$(date +'%Y.%m.%d')-dependency-updates" >> $GITHUB_OUTPUT
+            echo "name=feature/$(date +'%Y.%m.%d')-dependency-updates" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Check for existing PR
@@ -46,23 +48,24 @@ jobs:
 
       - name: Update NPM dependencies
         if: steps.check_pr.outputs.skip == 'false'
+        env:
+          NPM_SERVICES: ${{ inputs.npm_services }}
         run: |
           set -e
           # Update root package
           echo "Updating dependencies in root"
-          npx npm-check-updates -u
+          npx --yes npm-check-updates@23.1.0 -u --target minor
           npm install
           # Update sub-service packages
-          SERVICES='${{ inputs.npm_services }}'
-          for FOLDER in $(echo "${SERVICES}" | jq -r '.[]'); do
+          for FOLDER in $(echo "${NPM_SERVICES}" | jq -r '.[]'); do
             echo "Updating dependencies in ${FOLDER}"
             cd "${FOLDER}"
-            npx npm-check-updates -u
+            npx --yes npm-check-updates@23.1.0 -u --target minor
             npm install
             cd "${GITHUB_WORKSPACE}"
           done
           if [ -n "$(git status --porcelain)" ]; then
-            echo "HAS_CHANGES=true" >> $GITHUB_ENV
+            echo "HAS_CHANGES=true" >> "$GITHUB_ENV"
           fi
 
       - name: Bump root package.json patch version
@@ -78,15 +81,16 @@ jobs:
         if: steps.check_pr.outputs.skip == 'false' && env.HAS_CHANGES == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.branch.outputs.name }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b "${{ steps.branch.outputs.name }}"
+          git checkout -b "${BRANCH}"
           git add -A
           git commit -m "chore: update NPM dependencies"
-          git push origin "${{ steps.branch.outputs.name }}"
+          git push origin "${BRANCH}"
           gh pr create \
             --title "chore: update NPM dependencies" \
-            --body "Automated NPM dependency update" \
-            --head "${{ steps.branch.outputs.name }}" \
+            --body "Automated NPM dependency update (npm-check-updates --target minor)" \
+            --head "${BRANCH}" \
             --base main
