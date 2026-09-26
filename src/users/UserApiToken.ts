@@ -20,6 +20,8 @@ export class UserApiToken {
     apiToken.userId = json.userId;
     apiToken.tokenHash = json.tokenHash;
     apiToken.dateCreated = json.dateCreated;
+    apiToken.expiresAt = json.expiresAt ?? null;
+    apiToken.lastUsedAt = json.lastUsedAt ?? null;
     return apiToken;
   }
 
@@ -28,6 +30,10 @@ export class UserApiToken {
   public userId!: string;
   public tokenHash!: string;
   public dateCreated!: string;
+  /** Optional ISO expiry (`null` = never expires). */
+  public expiresAt: string | null = null;
+  /** Last successful authentication with this token (best effort). */
+  public lastUsedAt: string | null = null;
 
   constructor() {
     this.id = uuidv4();
@@ -40,6 +46,8 @@ export class UserApiToken {
       userId: this.userId,
       tokenHash: this.tokenHash,
       dateCreated: this.dateCreated,
+      expiresAt: this.expiresAt,
+      lastUsedAt: this.lastUsedAt,
     };
   }
 
@@ -50,6 +58,8 @@ export class UserApiToken {
       name: this.name,
       userId: this.userId,
       dateCreated: this.dateCreated,
+      expiresAt: this.expiresAt,
+      lastUsedAt: this.lastUsedAt,
     };
   }
 }
