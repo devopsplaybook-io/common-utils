@@ -450,7 +450,7 @@ fastify.register(new UsersRoutes().getRoutes, { prefix: "/api/users" });
 | `isUniqueViolationError`     | Detects unique-constraint violations (SQLite/Postgres)                 |
 | `UsersApiTokensDataSetOTel`  | Injects the OTel tracer used by the API tokens data module             |
 | `UsersApiTokensData*`        | API tokens table CRUD (`Get`, `GetByTokenHash`, `ListByUser`, `CountByUser`, `Add`, `Delete`, `DeleteByUser`, `SetLastUsed`) |
-| `UsersRoutes`                | Fastify routes: `GET /status/initialization`, `POST /session`, user CRUD, `PUT /password`, API tokens (`POST/GET /tokens`, `DELETE /tokens/:id`) |
+| `UsersRoutes`                | Fastify routes: `GET /status/initialization`, `POST /session` (login), `POST /session/refresh` (renew an authenticated session), user CRUD, `PUT /password`, API tokens (`POST/GET /tokens`, `DELETE /tokens/:id`) |
 
 **Schema requirements**
 
