@@ -136,6 +136,25 @@ export class UsersRoutes {
       }
     });
 
+    fastify.post("/session/refresh", async (req, res) => {
+      const userSession = await AuthGetUserSession(req);
+      if (!userSession.isAuthenticated) {
+        return res.status(403).send({ error: "Authentication Failed" });
+      }
+      const user = await UsersDataGet(
+        requestSpan(req),
+        userSession.userId as string,
+      );
+      if (!user) {
+        return res.status(403).send({ error: "Authentication Failed" });
+      }
+      return res.status(201).send({
+        success: true,
+        token: await AuthGenerateJWT(user),
+        user: user.toTransportJson(),
+      });
+    });
+
     // ==================== LIST USERS (Admin only) ====================
 
     fastify.get("/", async (req, res) => {

@@ -227,6 +227,38 @@ describe("UsersRoutes: bootstrap and session", () => {
     });
     expect(missing.statusCode).toBe(400);
   });
+
+  it("renews an authenticated session without requesting credentials", async () => {
+    const token = await bootstrapAdmin("root", "root-pass");
+
+    const renewed = await app.inject({
+      method: "POST",
+      url: "/api/users/session/refresh",
+      headers: auth(token),
+    });
+
+    expect(renewed.statusCode).toBe(201);
+    expect(renewed.json().success).toBe(true);
+    expect(renewed.json().user.name).toBe("root");
+    expect(
+      await AuthGetUserSession({ headers: auth(renewed.json().token) }),
+    ).toMatchObject({ isAuthenticated: true, userName: "root" });
+  });
+
+  it("rejects session renewal without valid authentication", async () => {
+    const unauthenticated = await app.inject({
+      method: "POST",
+      url: "/api/users/session/refresh",
+    });
+    expect(unauthenticated.statusCode).toBe(403);
+
+    const invalid = await app.inject({
+      method: "POST",
+      url: "/api/users/session/refresh",
+      headers: auth("invalid-token"),
+    });
+    expect(invalid.statusCode).toBe(403);
+  });
 });
 
 describe("UsersRoutes: malformed bodies answer 400 (not 500)", () => {
