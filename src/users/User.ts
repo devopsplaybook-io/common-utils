@@ -40,14 +40,17 @@ export class User {
     return [...User.DEFAULT_SCOPES];
   }
 
+  /**
+   * Build a user from a stored/transport JSON payload. Returns `null` when
+   * the payload is missing or has no `id`: a user without identity must not
+   * be silently assigned a fresh uuid.
+   */
   public static fromJson(json: any): User | null {
-    if (!json) {
+    if (!json || !json.id) {
       return null;
     }
     const user = new User();
-    if (json.id) {
-      user.id = json.id;
-    }
+    user.id = json.id;
     user.name = json.name;
     user.passwordEncrypted = json.passwordEncrypted;
     user.role = json.role || "user";

@@ -46,7 +46,7 @@ jobs:
         run: npm test
 
       - name: Zip coverage and upload to Quality Dashboard
-        if: always()
+        if: ${{ success() }}
         env:
           QUALITY_DASHBOARD_URL: ${{ secrets.QUALITY_DASHBOARD_URL }}
           QUALITY_DASHBOARD_TOKEN: ${{ secrets.QUALITY_DASHBOARD_TOKEN }}
@@ -81,7 +81,7 @@ jobs:
               -F "file=@${{ runner.temp }}/coverage.zip" \
               --max-time 30)
 
-            if [ "$HTTP_CODE" = "201" ]; then
+            if [[ "$HTTP_CODE" =~ ^2[0-9][0-9]$ ]]; then
               echo "\u2713 Coverage uploaded ($HTTP_CODE)"
             else
               echo "\u26a0 Upload returned HTTP $HTTP_CODE"

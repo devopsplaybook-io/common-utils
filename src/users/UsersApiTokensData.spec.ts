@@ -218,6 +218,62 @@ describe("UsersApiTokensData", () => {
     expect(params).toEqual(["2026-09-14T12:00:00.000Z", "token-1"]);
   });
 
+  it("should run the optional-columns probe once for concurrent first calls", async () => {
+    await jest.isolateModulesAsync(async () => {
+      const freshModule =
+        require("./UsersApiTokensData") as typeof import("./UsersApiTokensData");
+      freshModule.UsersApiTokensDataSetOTel(mockTracer);
+
+      let releaseProbe!: (rows: unknown[]) => void;
+      mockedQuery.mockImplementationOnce(
+        () => new Promise((resolve) => (releaseProbe = resolve)),
+      );
+
+      const first =
+        freshModule.UsersApiTokensDataSupportsOptionalColumns(undefined);
+      const second =
+        freshModule.UsersApiTokensDataSupportsOptionalColumns(undefined);
+
+      // Both concurrent callers share a single in-flight probe.
+      expect(mockedQuery).toHaveBeenCalledTimes(1);
+
+      releaseProbe([]);
+      await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
+      expect(mockedQuery).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("should cache a failed probe as false for concurrent callers", async () => {
+    await jest.isolateModulesAsync(async () => {
+      const freshModule =
+        require("./UsersApiTokensData") as typeof import("./UsersApiTokensData");
+      freshModule.UsersApiTokensDataSetOTel(mockTracer);
+
+      let rejectProbe!: (error: Error) => void;
+      mockedQuery.mockImplementationOnce(
+        () => new Promise((_resolve, reject) => (rejectProbe = reject)),
+      );
+
+      const first =
+        freshModule.UsersApiTokensDataSupportsOptionalColumns(undefined);
+      const second =
+        freshModule.UsersApiTokensDataSupportsOptionalColumns(undefined);
+      expect(mockedQuery).toHaveBeenCalledTimes(1);
+
+      rejectProbe(new Error('no such column: "expiresAt"'));
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        false,
+        false,
+      ]);
+
+      // The failed probe is sticky: later calls do not re-probe.
+      await expect(
+        freshModule.UsersApiTokensDataSupportsOptionalColumns(undefined),
+      ).resolves.toBe(false);
+      expect(mockedQuery).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("should skip lastUsedAt writes when the column is missing", async () => {
     await jest.isolateModulesAsync(async () => {
       const freshModule =

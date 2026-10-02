@@ -5,8 +5,12 @@ jest.mock("uuid", () => ({
 jest.mock("../DbUtils", () => ({
   DbUtilsQuerySQL: jest.fn(),
   DbUtilsExecSQL: jest.fn(),
-  DbUtilsWithLock: jest.fn((_lock: string, callback: () => Promise<unknown>) =>
-    callback(),
+  DbUtilsWithLock: jest.fn(
+    (
+      _lock: string,
+      callback: () => Promise<unknown>,
+      _context?: unknown,
+    ) => callback(),
   ),
 }));
 
@@ -352,6 +356,7 @@ describe("AuthInit", () => {
     expect(mockedWithLock).toHaveBeenCalledWith(
       "auth_token",
       expect.any(Function),
+      expect.objectContaining({ end: expect.any(Function) }),
     );
   });
 

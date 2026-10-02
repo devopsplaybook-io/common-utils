@@ -7,9 +7,19 @@ import {
 
 let logger: ModuleLogger;
 
+/** Promise-based view of the `pg.Pool` handle returned by {@link DbUtilsGetDatabase}. */
+interface PgQueryable {
+  query(
+    sql: string,
+    params: unknown[],
+  ): Promise<{ rowCount: number | null; rows: unknown[] }>;
+}
+
 /**
  * Compiled SQLite statements are cached per database handle: `better-sqlite3`
  * has no internal cache and `prepare()` dominates the ingestion hot path.
+ * The cache evicts the least-recently-used entry (a hit re-inserts the
+ * statement), so a hot statement survives a stream of one-shot statements.
  */
 const PREPARED_STATEMENT_CACHE_MAX = 100;
 const statementCaches = new WeakMap<object, Map<string, any>>();
@@ -20,17 +30,21 @@ function prepareCached(db: object, sql: string): any {
     cache = new Map<string, any>();
     statementCaches.set(db, cache);
   }
-  let statement = cache.get(sql);
-  if (!statement) {
-    if (cache.size >= PREPARED_STATEMENT_CACHE_MAX) {
-      const oldest = cache.keys().next().value;
-      if (oldest !== undefined) {
-        cache.delete(oldest);
-      }
-    }
-    statement = (db as { prepare: (sql: string) => any }).prepare(sql);
-    cache.set(sql, statement);
+  const cached = cache.get(sql);
+  if (cached !== undefined) {
+    // LRU: move the hit to the most-recently-used position.
+    cache.delete(sql);
+    cache.set(sql, cached);
+    return cached;
   }
+  if (cache.size >= PREPARED_STATEMENT_CACHE_MAX) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) {
+      cache.delete(oldest);
+    }
+  }
+  const statement = (db as { prepare: (sql: string) => any }).prepare(sql);
+  cache.set(sql, statement);
   return statement;
 }
 
@@ -126,20 +140,13 @@ export function DbUtilsNoTelemetryExecSQL(
   const dbType = DbUtilsGetType();
   if (dbType === "postgres") {
     const pgSql = convertToPostgresPlaceholders(sql);
-    return new Promise((resolve, reject) => {
-      (DbUtilsGetDatabase() as any).query(
-        pgSql,
-        params,
-        (error: Error | null, result: { rowCount: number | null }) => {
-          if (error) {
-            logger.error(`SQL INSERT ERROR: ${sql.substring(0, 200)}`, error);
-            reject(error);
-          } else {
-            resolve(result.rowCount || 0);
-          }
-        },
-      );
-    });
+    return (DbUtilsGetDatabase() as PgQueryable)
+      .query(pgSql, params)
+      .then((result) => result.rowCount || 0)
+      .catch((error: Error) => {
+        logger.error(`SQL INSERT ERROR: ${sql.substring(0, 200)}`, error);
+        throw error;
+      });
   }
   // SQLite (better-sqlite3) – synchronous
   const db = DbUtilsGetDatabase();
@@ -165,20 +172,13 @@ export function DbUtilsNoTelemetryQuerySQL(
   const dbType = DbUtilsGetType();
   if (dbType === "postgres") {
     const pgSql = convertToPostgresPlaceholders(sql);
-    return new Promise((resolve, reject) => {
-      (DbUtilsGetDatabase() as any).query(
-        pgSql,
-        params,
-        (error: Error | null, result: { rows: unknown[] }) => {
-          if (error) {
-            logger.error(`SQL ERROR: ${sql}`, error);
-            reject(error);
-          } else {
-            resolve(result.rows);
-          }
-        },
-      );
-    });
+    return (DbUtilsGetDatabase() as PgQueryable)
+      .query(pgSql, params)
+      .then((result) => result.rows)
+      .catch((error: Error) => {
+        logger.error(`SQL ERROR: ${sql}`, error);
+        throw error;
+      });
   }
   // SQLite (better-sqlite3) – synchronous
   const stmt = prepareCached(DbUtilsGetDatabase(), sql);

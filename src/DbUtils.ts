@@ -65,13 +65,21 @@ export async function DbUtilsInit(
  * Run a bootstrap callback while holding the named advisory lock. Replicas
  * booting concurrently serialise the callback on Postgres; SQLite has a
  * single writer and runs it directly.
+ *
+ * @param context  Optional parent span forwarded to the Postgres advisory
+ *                 lock so the wait appears in the caller's trace.
  */
 export async function DbUtilsWithLock<T>(
   lock: DbUtilsLockName,
   callback: () => Promise<T>,
+  context?: Span,
 ): Promise<T> {
   if (databaseType === "postgres") {
-    return PostgresDbUtils.PostgresDbUtilsWithAdvisoryLock(lock, callback);
+    return PostgresDbUtils.PostgresDbUtilsWithAdvisoryLock(
+      lock,
+      callback,
+      context,
+    );
   }
   return callback();
 }

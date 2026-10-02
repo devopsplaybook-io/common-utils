@@ -233,18 +233,22 @@ export class UsersRoutes {
 
       // Bootstrap: serialise the "no user yet → first admin" sequence across
       // replicas (advisory lock on Postgres; single writer on SQLite).
-      return DbUtilsWithLock("users_bootstrap", async () => {
-        if ((await UsersDataCount(context)) === 0) {
-          return createUser(true);
-        }
-        // Another replica bootstrapped first: require admin credentials.
-        try {
-          await AuthMustBeAdmin(req, res);
-        } catch {
-          return;
-        }
-        return createUser(false);
-      });
+      return DbUtilsWithLock(
+        "users_bootstrap",
+        async () => {
+          if ((await UsersDataCount(context)) === 0) {
+            return createUser(true);
+          }
+          // Another replica bootstrapped first: require admin credentials.
+          try {
+            await AuthMustBeAdmin(req, res);
+          } catch {
+            return;
+          }
+          return createUser(false);
+        },
+        context,
+      );
     });
 
     // ==================== CHANGE OWN PASSWORD ====================
