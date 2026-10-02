@@ -3,6 +3,7 @@ import {
   StandardMeter,
   StandardTracer,
 } from "@devopsplaybook.io/otel-utils";
+import { OTelRequestSpan as OTelRequestSpanFromLibrary } from "@devopsplaybook.io/otel-utils-fastify";
 import { Span } from "@opentelemetry/sdk-trace-base";
 
 /**
@@ -17,8 +18,8 @@ export interface OTelContext {
   OTelSetMeter: (meter: StandardMeter) => void;
   OTelLogger: () => StandardLogger;
   /**
-   * Retrieves the span previously attached to a request object.
-   * Equivalent to `req.tracerSpanApi`.
+   * Retrieves the span previously attached to a request object by the
+   * `@devopsplaybook.io/otel-utils-fastify` Fastify hooks.
    */
   OTelRequestSpan: (req: any) => Span | undefined;
 }
@@ -58,6 +59,6 @@ export function createOTelContext(): OTelContext {
       }
       return logger;
     },
-    OTelRequestSpan: (req: any) => req?.tracerSpanApi as Span | undefined,
+    OTelRequestSpan: (req: any) => OTelRequestSpanFromLibrary(req),
   };
 }

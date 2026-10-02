@@ -56,7 +56,7 @@ The weekly update of the shared npm libraries is agent-driven instead: a Kuberne
 - **Tests**: Jest with `@swc/jest` transform (`jsc.target` matches tsconfig ES2019) and `v8` coverage provider. Spec files live next to source (`*.spec.ts`). Run with `npm run test`. The `tsconfig.spec.json` includes jest types; `npm run build` also type-checks specs (`tsc -p tsconfig.spec.json --noEmit`).
 - **No default exports**: All modules use named exports only.
 - **OTel dependency injection**: Every DB module exposes a `*SetOTel(tracer, logger)` function that must be called before `*Init()`. OTel instances are stored as module-level singletons.
-- **Auth modules**: `AuthSetOTel(tracer)` and `UsersDataSetOTel(tracer)` must be called before `AuthInit`. Application scopes are registered through `AuthInit(context, config, allScopes)`; `UsersRoutes` relies on `req.tracerSpanApi` set by the `otel-utils-fastify` hooks.
+- **Auth modules**: `AuthSetOTel(tracer)` and `UsersDataSetOTel(tracer)` must be called before `AuthInit`. Application scopes are registered through `AuthInit(context, config, allScopes)`; `UsersRoutes` retrieves the request span via `OTelRequestSpan(req)` from `@devopsplaybook.io/otel-utils-fastify` (populated by its Fastify hooks).
 - **ModuleLogger pattern**: `StandardLogger` only exposes `createModuleLogger(name)`. DB modules call `logger.createModuleLogger("ModuleName")` internally. Never call `.info()` or `.error()` directly on a `StandardLogger`.
 - **SQLite-first SQL**: Write SQL with `?` placeholders. The `DbUtils` facade and `DbUtilsNoTelemetry` module auto-convert to `$1, $2, ...` for Postgres via `convertToPostgresPlaceholders()`.
 - **Migration convention**: SQL files named `init-NNNN.sql`. `init-0000.sql` must create the `metadata` table. Subsequent files are applied in lexicographic order; applied versions are tracked in `metadata` for idempotency.
@@ -76,16 +76,17 @@ All three commands must pass before committing. The CI pipeline (`reusable-npm-m
 
 ## Dependencies
 
-| Package                         | Role                                                                                       |
-| ------------------------------- | ------------------------------------------------------------------------------------------ |
-| `@devopsplaybook.io/otel-utils` | `StandardTracer`, `StandardLogger`, `StandardMeter`, `ModuleLogger`, `ConfigOTelInterface` |
-| `better-sqlite3`                | Synchronous SQLite driver (NOT the callback-based `sqlite3`)                               |
-| `pg`                            | PostgreSQL client with connection pooling                                                  |
-| `uuid`                          | v14+ (ESM -- requires `jest.mock("uuid")` in tests)                                        |
-| `fs-extra`                      | Async/sync file operations, `readJson`/`ensureDir`                                         |
-| `bcrypt`                        | Password hashing (users module)                                                            |
-| `jsonwebtoken`                  | JWT signing/verification (auth module)                                                     |
-| `fastify`                       | HTTP framework types used by `UsersRoutes`                                                 |
+| Package                                 | Role                                                                                       |
+| --------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `@devopsplaybook.io/otel-utils`         | `StandardTracer`, `StandardLogger`, `StandardMeter`, `ModuleLogger`, `ConfigOTelInterface` |
+| `@devopsplaybook.io/otel-utils-fastify` | `OTelRequestSpan` request-span lookup used by `UsersRoutes`                                |
+| `better-sqlite3`                        | Synchronous SQLite driver (NOT the callback-based `sqlite3`)                               |
+| `pg`                                    | PostgreSQL client with connection pooling                                                  |
+| `uuid`                                  | v14+ (ESM -- requires `jest.mock("uuid")` in tests)                                        |
+| `fs-extra`                              | Async/sync file operations, `readJson`/`ensureDir`                                         |
+| `bcrypt`                                | Password hashing (users module)                                                            |
+| `jsonwebtoken`                          | JWT signing/verification (auth module)                                                     |
+| `fastify`                               | HTTP framework types used by `UsersRoutes`                                                 |
 
 ## Known Gotchas
 

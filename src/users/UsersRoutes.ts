@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "crypto";
-import { Span } from "@opentelemetry/sdk-trace-base";
+import { OTelRequestSpan } from "@devopsplaybook.io/otel-utils-fastify";
 import { FastifyInstance, RequestGenericInterface } from "fastify";
 import {
   AuthGenerateJWT,
@@ -41,14 +41,6 @@ import {
 /** Maximum accepted API token name length. */
 const API_TOKEN_NAME_MAX_LENGTH = 255;
 
-/**
- * Retrieves the OTel span attached to the request by the
- * `@devopsplaybook.io/otel-utils-fastify` hooks.
- */
-function requestSpan(req: any): Span | undefined {
-  return req?.tracerSpanApi;
-}
-
 /** Parse an optional non-negative integer query parameter. */
 function parseNonNegativeInt(value: unknown): number | undefined {
   if (value === undefined || value === null || value === "") {
@@ -76,7 +68,7 @@ export class UsersRoutes {
   public async getRoutes(fastify: FastifyInstance): Promise<void> {
     //
     fastify.get("/status/initialization", async (req, res) => {
-      const count = await UsersDataCount(requestSpan(req));
+      const count = await UsersDataCount(OTelRequestSpan(req));
       return res.status(200).send({ initialized: count > 0 });
     });
 
@@ -96,7 +88,7 @@ export class UsersRoutes {
       if (userSession.isAuthenticated) {
         // isAuthenticated implies userId is set
         user = await UsersDataGet(
-          requestSpan(req),
+          OTelRequestSpan(req),
           userSession.userId as string,
         );
         if (!user) {
@@ -116,12 +108,12 @@ export class UsersRoutes {
       if (!body.password) {
         return res.status(400).send({ error: "Missing: Password" });
       }
-      user = await UsersDataGetByName(requestSpan(req), body.name);
+      user = await UsersDataGetByName(OTelRequestSpan(req), body.name);
       if (!user) {
         return res.status(403).send({ error: "Authentication Failed" });
       } else if (
         await UserPasswordCheckPassword(
-          requestSpan(req),
+          OTelRequestSpan(req),
           user,
           body.password,
         )
@@ -142,7 +134,7 @@ export class UsersRoutes {
         return res.status(403).send({ error: "Authentication Failed" });
       }
       const user = await UsersDataGet(
-        requestSpan(req),
+        OTelRequestSpan(req),
         userSession.userId as string,
       );
       if (!user) {
@@ -172,7 +164,7 @@ export class UsersRoutes {
       if (query.offset !== undefined && offset === undefined) {
         return res.status(400).send({ error: "Invalid: offset" });
       }
-      const users = await UsersDataList(requestSpan(req), limit, offset);
+      const users = await UsersDataList(OTelRequestSpan(req), limit, offset);
       return res.status(200).send(users.map((u) => u.toTransportJson()));
     });
 
@@ -187,7 +179,7 @@ export class UsersRoutes {
       };
     }
     fastify.post<PostUser>("/", async (req, res) => {
-      const context = requestSpan(req);
+      const context = OTelRequestSpan(req);
       const body = req.body ?? {};
 
       const createUser = async (isFirstUser: boolean) => {
@@ -264,7 +256,7 @@ export class UsersRoutes {
       };
     }
     fastify.put<PutOwnPassword>("/password", async (req, res) => {
-      const context = requestSpan(req);
+      const context = OTelRequestSpan(req);
       const body = req.body ?? {};
       const userSession = await AuthGetUserSession(req);
       if (!userSession.isAuthenticated) {
@@ -304,7 +296,7 @@ export class UsersRoutes {
       };
     }
     fastify.put<PutUser>("/:id", async (req, res) => {
-      const context = requestSpan(req);
+      const context = OTelRequestSpan(req);
       const body = req.body ?? {};
       try {
         await AuthMustBeAdmin(req, res);
@@ -380,7 +372,7 @@ export class UsersRoutes {
       };
     }
     fastify.delete<DeleteUser>("/:id", async (req, res) => {
-      const context = requestSpan(req);
+      const context = OTelRequestSpan(req);
       try {
         await AuthMustBeAdmin(req, res);
       } catch {
@@ -423,7 +415,7 @@ export class UsersRoutes {
       };
     }
     fastify.post<PostApiToken>("/tokens", async (req, res) => {
-      const context = requestSpan(req);
+      const context = OTelRequestSpan(req);
       const body = req.body ?? {};
       const userSession = await AuthGetUserSession(req);
       if (!userSession.isAuthenticated) {
@@ -486,7 +478,7 @@ export class UsersRoutes {
     });
 
     fastify.get("/tokens", async (req, res) => {
-      const context = requestSpan(req);
+      const context = OTelRequestSpan(req);
       const userSession = await AuthGetUserSession(req);
       if (!userSession.isAuthenticated) {
         return res.status(403).send({ error: "Access Denied" });
@@ -506,7 +498,7 @@ export class UsersRoutes {
       };
     }
     fastify.delete<DeleteApiToken>("/tokens/:id", async (req, res) => {
-      const context = requestSpan(req);
+      const context = OTelRequestSpan(req);
       const userSession = await AuthGetUserSession(req);
       if (!userSession.isAuthenticated) {
         return res.status(403).send({ error: "Access Denied" });
