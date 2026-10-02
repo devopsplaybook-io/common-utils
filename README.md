@@ -24,21 +24,24 @@ npm install @devopsplaybook.io/common-utils
 
 **Dependencies** (regular dependencies, installed automatically with the package):
 
-| Package                         | Purpose                                             |
-| ------------------------------- | --------------------------------------------------- |
-| `@devopsplaybook.io/otel-utils` | `StandardTracer`, `StandardLogger`, `StandardMeter` |
-| `@opentelemetry/api`            | OTel API (`SpanStatusCode`)                         |
-| `@opentelemetry/sdk-trace-base` | `Span` type                                         |
-| `better-sqlite3`                | Synchronous SQLite driver                           |
-| `pg`                            | PostgreSQL client (`Pool`)                          |
-| `fs-extra`                      | File system helpers                                 |
-| `uuid`                          | UUID generation for JWT keys                        |
-| `axios`                         | HTTP client for the notifications and LLM integrations |
-| `bcrypt`                        | Password hashing for the users module               |
-| `jsonwebtoken`                  | JWT signing/verification for the auth module        |
-| `fastify`                       | HTTP framework types for the users routes           |
+| Package                                 | Purpose                                                |
+| --------------------------------------- | ------------------------------------------------------ |
+| `@devopsplaybook.io/otel-utils`         | `StandardTracer`, `StandardLogger`, `StandardMeter`    |
+| `@devopsplaybook.io/otel-utils-fastify` | `OTelRequestSpan` lookup for the users routes          |
+| `@opentelemetry/api`                    | OTel API (`SpanStatusCode`)                            |
+| `@opentelemetry/sdk-trace-base`         | `Span` type                                            |
+| `better-sqlite3`                        | Synchronous SQLite driver                              |
+| `pg`                                    | PostgreSQL client (`Pool`)                             |
+| `fs-extra`                              | File system helpers                                    |
+| `uuid`                                  | UUID generation for JWT keys                           |
+| `axios`                                 | HTTP client for the notifications and LLM integrations |
+| `bcrypt`                                | Password hashing for the users module                  |
+| `jsonwebtoken`                          | JWT signing/verification for the auth module           |
+| `fastify`                               | HTTP framework types for the users routes              |
 
 `fastify` is kept as a regular dependency (not a peer dependency) because `UsersRoutes` is typed against its `FastifyInstance` / `RequestGenericInterface` types: apps that register the routes already have fastify, and apps that don't use the routes must not be forced to add it.
+
+`@devopsplaybook.io/otel-utils-fastify` is a regular dependency for the same reason: `UsersRoutes` resolves the request span with its `OTelRequestSpan(req)`, which reads the span map populated by the library's Fastify hooks. The lookup needs the application and `common-utils` to share a single physical copy of that package; compatible `^1.x` ranges in both are deduped by npm, so a pinned older copy must be avoided.
 
 **Subpath imports** -- every module is also exposed as a subpath export, so importing one module never pulls in the whole barrel (and with it the native database drivers):
 

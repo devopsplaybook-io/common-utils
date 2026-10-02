@@ -1,6 +1,19 @@
 import { createOTelContext } from "./OTelContext";
+import { OTelRequestSpan } from "@devopsplaybook.io/otel-utils-fastify";
+
+jest.mock("@devopsplaybook.io/otel-utils-fastify", () => ({
+  OTelRequestSpan: jest.fn(),
+}));
+
+const mockOTelRequestSpan = OTelRequestSpan as jest.MockedFunction<
+  typeof OTelRequestSpan
+>;
 
 describe("createOTelContext", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
   it("should return an object with all expected methods", () => {
     const ctx = createOTelContext();
     expect(typeof ctx.OTelTracer).toBe("function");
@@ -44,15 +57,20 @@ describe("createOTelContext", () => {
     expect(ctx2.OTelTracer()).toBe(fakeTracer2);
   });
 
-  it("OTelRequestSpan should return undefined for object without tracerSpanApi", () => {
+  it("OTelRequestSpan delegates to the otel-utils-fastify lookup", () => {
     const ctx = createOTelContext();
-    expect(ctx.OTelRequestSpan({})).toBeUndefined();
+    const req = { url: "/api/test" };
+    const fakeSpan = { spanId: "123" } as never;
+    mockOTelRequestSpan.mockReturnValue(fakeSpan);
+    expect(ctx.OTelRequestSpan(req)).toBe(fakeSpan);
+    expect(mockOTelRequestSpan).toHaveBeenCalledWith(req);
   });
 
-  it("OTelRequestSpan should return the span when present", () => {
+  it("OTelRequestSpan returns undefined when the library finds no span", () => {
     const ctx = createOTelContext();
-    const fakeSpan = { spanId: "123" } as never;
-    const req = { tracerSpanApi: fakeSpan };
-    expect(ctx.OTelRequestSpan(req)).toBe(fakeSpan);
+    const req = {};
+    mockOTelRequestSpan.mockReturnValue(undefined);
+    expect(ctx.OTelRequestSpan(req)).toBeUndefined();
+    expect(mockOTelRequestSpan).toHaveBeenCalledWith(req);
   });
 });
