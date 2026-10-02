@@ -99,10 +99,8 @@ describe("DbUtilsNoTelemetryBatchInsert", () => {
 
   it("chunks large inserts below the Postgres parameter limit sequentially", async () => {
     currentDbType = "postgres";
-    mockQuery.mockImplementation(
-      (_sql: string, params: unknown[], cb: Function) => {
-        cb(null, { rowCount: params.length / 9 });
-      },
+    mockQuery.mockImplementation((_sql: string, params: unknown[]) =>
+      Promise.resolve({ rowCount: params.length / 9 }),
     );
 
     const rows = Array.from({ length: 8000 }, (_, rowIndex) =>
@@ -159,31 +157,52 @@ describe("DbUtilsNoTelemetryExecSQL (sqlite)", () => {
   });
 });
 
+describe("DbUtilsNoTelemetry prepared statement cache (sqlite)", () => {
+  beforeEach(() => {
+    currentDbType = "sqlite";
+    mockPrepare.mockImplementation(
+      () => ({ run: jest.fn(), all: jest.fn().mockReturnValue([]) }) as any,
+    );
+  });
+
+  it("evicts least-recently-used entries, keeping a hot statement cached", () => {
+    const hotSql = "SELECT 7373 AS hot_lru";
+
+    DbUtilsNoTelemetryQuerySQL(hotSql);
+    // 120 distinct one-shot statements would evict the hot statement under
+    // FIFO even though it is re-used on every iteration.
+    for (let index = 0; index < 120; index++) {
+      DbUtilsNoTelemetryQuerySQL(`SELECT ${index} AS one_shot_lru`);
+      DbUtilsNoTelemetryQuerySQL(hotSql);
+    }
+
+    const hotPreparations = mockPrepare.mock.calls.filter(
+      (call) => call[0] === hotSql,
+    ).length;
+    expect(hotPreparations).toBe(1);
+    expect(mockPrepare).toHaveBeenCalledTimes(121);
+  });
+});
+
 describe("DbUtilsNoTelemetryExecSQL (postgres)", () => {
   beforeEach(() => {
     currentDbType = "postgres";
   });
 
-  it("resolves with rowCount on success", async () => {
-    mockQuery.mockImplementation(
-      (_sql: string, _params: unknown[], cb: Function) => {
-        cb(null, { rowCount: 5 });
-      },
-    );
+  it("resolves with rowCount on success through the promise-based query", async () => {
+    mockQuery.mockResolvedValue({ rowCount: 5 });
 
     const result = await DbUtilsNoTelemetryExecSQL(
       "INSERT INTO t (c) VALUES (?)",
       ["x"],
     );
     expect(result).toBe(5);
+    // Promise form: (sql, params) only, no callback argument.
+    expect(mockQuery).toHaveBeenCalledWith("INSERT INTO t (c) VALUES ($1)", ["x"]);
   });
 
   it("rejects on error", async () => {
-    mockQuery.mockImplementation(
-      (_sql: string, _params: unknown[], cb: Function) => {
-        cb(new Error("deadlock detected"));
-      },
-    );
+    mockQuery.mockRejectedValue(new Error("deadlock detected"));
 
     await expect(
       DbUtilsNoTelemetryExecSQL("INSERT INTO pg_fail (c) VALUES (?)", ["x"]),
@@ -213,24 +232,17 @@ describe("DbUtilsNoTelemetryQuerySQL (postgres)", () => {
     currentDbType = "postgres";
   });
 
-  it("returns rows on success", async () => {
+  it("returns rows on success through the promise-based query", async () => {
     const expectedRows = [{ id: 1 }, { id: 2 }];
-    mockQuery.mockImplementation(
-      (_sql: string, _params: unknown[], cb: Function) => {
-        cb(null, { rows: expectedRows });
-      },
-    );
+    mockQuery.mockResolvedValue({ rows: expectedRows });
 
     const result = await DbUtilsNoTelemetryQuerySQL("SELECT * FROM t");
     expect(result).toEqual(expectedRows);
+    expect(mockQuery).toHaveBeenCalledWith("SELECT * FROM t", []);
   });
 
   it("rejects on error", async () => {
-    mockQuery.mockImplementation(
-      (_sql: string, _params: unknown[], cb: Function) => {
-        cb(new Error("connection lost"));
-      },
-    );
+    mockQuery.mockRejectedValue(new Error("connection lost"));
 
     await expect(DbUtilsNoTelemetryQuerySQL("SELECT * FROM t")).rejects.toThrow(
       "connection lost",

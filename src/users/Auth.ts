@@ -85,21 +85,25 @@ export async function AuthInit(
   User.ALL_SCOPES = [...allScopes];
   const span = tracer.startSpan("AuthInit", context);
   try {
-    await DbUtilsWithLock("auth_token", async () => {
-      const authKeyRaw = await DbUtilsQuerySQL(
-        span,
-        SQL_QUERIES.GET_AUTH_TOKEN,
-      );
-      if (authKeyRaw.length == 0) {
-        configIn.JWT_KEY = uuidv4();
-        await DbUtilsExecSQL(span, SQL_QUERIES.INSERT_AUTH_TOKEN, [
-          configIn.JWT_KEY,
-          new Date().toISOString(),
-        ]);
-      } else {
-        configIn.JWT_KEY = authKeyRaw[0].value;
-      }
-    });
+    await DbUtilsWithLock(
+      "auth_token",
+      async () => {
+        const authKeyRaw = await DbUtilsQuerySQL(
+          span,
+          SQL_QUERIES.GET_AUTH_TOKEN,
+        );
+        if (authKeyRaw.length == 0) {
+          configIn.JWT_KEY = uuidv4();
+          await DbUtilsExecSQL(span, SQL_QUERIES.INSERT_AUTH_TOKEN, [
+            configIn.JWT_KEY,
+            new Date().toISOString(),
+          ]);
+        } else {
+          configIn.JWT_KEY = authKeyRaw[0].value;
+        }
+      },
+      span,
+    );
   } finally {
     span.end();
   }

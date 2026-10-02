@@ -48,9 +48,10 @@ const mockClient = {
 
 const mockSpans: any[] = [];
 const mockTracer = {
-  startSpan: jest.fn((name: string) => {
+  startSpan: jest.fn((name: string, context?: unknown) => {
     const span = {
       name,
+      parentContext: context,
       end: jest.fn(),
       setStatus: jest.fn(),
       addEvent: jest.fn(),
@@ -335,6 +336,29 @@ describe("PostgresDbUtilsWithAdvisoryLock", () => {
     );
     expect(mockClientRelease).toHaveBeenCalledTimes(1);
   });
+
+  it("creates the advisory-lock span under the provided parent context", async () => {
+    const parentSpan = { name: "request-span" } as never;
+
+    await PostgresDbUtilsWithAdvisoryLock(
+      "users_bootstrap",
+      async () => "done",
+      parentSpan,
+    );
+
+    const lockSpan = mockSpans.find(
+      (span) => span.name === "PostgresDbUtilsAdvisoryLock",
+    );
+    expect(lockSpan).toBeDefined();
+    expect(lockSpan.parentContext).toBe(parentSpan);
+    expect(allSpansEnded()).toBe(true);
+  });
+
+  it("does not create an advisory-lock span without a parent context", async () => {
+    await PostgresDbUtilsWithAdvisoryLock("users_bootstrap", async () => "done");
+
+    expect(mockSpans.length).toBe(0);
+  });
 });
 
 describe("PostgresDbUtils functional API", () => {
@@ -552,5 +576,100 @@ describe("PostgresSchemaDbUtils", () => {
     expect(executedSql()).toEqual(["BEGIN", "ROLLBACK"]);
     expect(mockClientRelease).toHaveBeenCalledTimes(2);
     expect(allSpansEnded()).toBe(true);
+  });
+
+  it("executes a SQL file through the requested pool", async () => {
+    mockReaddir.mockResolvedValue([]);
+    const schemaDb = new PostgresSchemaDbUtils("myschema");
+    await schemaDb.initSchema(undefined as never, makeConfig(), "/sql");
+    const schemaPool = mockCreatedPools[0];
+    schemaPool.query.mockResolvedValue({ rows: [], rowCount: 0 });
+
+    await schemaDb.execSQLFile(undefined as never, "/sql/extra.sql", true);
+    expect(schemaPool.query).toHaveBeenCalledWith("SQL:/sql/extra.sql");
+
+    await schemaDb.initRuntimePool(makeConfig());
+    const runtimePool = mockCreatedPools[1];
+    runtimePool.query.mockResolvedValue({ rows: [], rowCount: 0 });
+
+    await schemaDb.execSQLFile(undefined as never, "/sql/runtime.sql");
+    expect(runtimePool.query).toHaveBeenCalledWith("SQL:/sql/runtime.sql");
+    expect(schemaPool.query).toHaveBeenCalledTimes(1);
+    expect(allSpansEnded()).toBe(true);
+  });
+
+  it("rejects execSQLFile when the requested pool is not initialized and ends the span on failure", async () => {
+    mockReaddir.mockResolvedValue([]);
+    const schemaDb = new PostgresSchemaDbUtils("myschema");
+    await schemaDb.initSchema(undefined as never, makeConfig(), "/sql");
+    mockSpans.length = 0;
+
+    // No runtime pool yet
+    await expect(
+      schemaDb.execSQLFile(undefined as never, "/sql/extra.sql"),
+    ).rejects.toThrow("Pool not initialized");
+    expect(allSpansEnded()).toBe(true);
+
+    mockSpans.length = 0;
+    mockReadFile.mockRejectedValue(new Error("ENOENT"));
+    await expect(
+      schemaDb.execSQLFile(undefined as never, "/sql/missing.sql", true),
+    ).rejects.toThrow("ENOENT");
+    expect(allSpansEnded()).toBe(true);
+  });
+});
+
+describe("PostgresSchemaDbUtils.initRuntimePool", () => {
+  it("assigns the new pool before awaiting the previous pool's closure", async () => {
+    mockReaddir.mockResolvedValue([]);
+    const schemaDb = new PostgresSchemaDbUtils("myschema");
+    await schemaDb.initSchema(undefined as never, makeConfig(), "/sql");
+    await schemaDb.initRuntimePool(makeConfig());
+    const previousPool = mockCreatedPools[1];
+
+    let releaseEnd!: () => void;
+    previousPool.end.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseEnd = resolve;
+        }),
+    );
+
+    let resolved = false;
+    const reinit = schemaDb
+      .initRuntimePool(makeConfig(), "other_schema")
+      .then(() => {
+        resolved = true;
+      });
+
+    // The replacement pool is active immediately, before the previous pool
+    // finished closing; initRuntimePool resolves only after that closure.
+    const newPool = mockCreatedPools[2];
+    expect(newPool.config.options).toBe("-c search_path=other_schema");
+    newPool.query.mockResolvedValue({ rows: [{ value: 1 }], rowCount: 1 });
+    await expect(
+      schemaDb.querySQL(undefined as never, "SELECT 1"),
+    ).resolves.toEqual([{ value: 1 }]);
+    expect(previousPool.end).toHaveBeenCalledTimes(1);
+    expect(resolved).toBe(false);
+
+    releaseEnd();
+    await reinit;
+    expect(resolved).toBe(true);
+  });
+
+  it("ends every previous pool across repeated initialisations", async () => {
+    mockReaddir.mockResolvedValue([]);
+    const schemaDb = new PostgresSchemaDbUtils("myschema");
+    await schemaDb.initSchema(undefined as never, makeConfig(), "/sql");
+
+    await schemaDb.initRuntimePool(makeConfig());
+    await schemaDb.initRuntimePool(makeConfig());
+    await schemaDb.initRuntimePool(makeConfig());
+
+    expect(mockCreatedPools[1].end).toHaveBeenCalledTimes(1);
+    expect(mockCreatedPools[2].end).toHaveBeenCalledTimes(1);
+    // The current (third) runtime pool stays open.
+    expect(mockCreatedPools[3].end).not.toHaveBeenCalled();
   });
 });

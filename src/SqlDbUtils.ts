@@ -21,24 +21,31 @@ let logger: ModuleLogger;
 
 /**
  * Compiled statements are cached: `better-sqlite3` has no internal cache and
- * `prepare()` is the dominant cost on hot paths.  The cache is bounded and is
- * reset by {@link SqlDbUtilsInit} (statements belong to one `Database` handle).
+ * `prepare()` is the dominant cost on hot paths.  The cache is bounded and
+ * evicts the least-recently-used entry (a hit re-inserts the statement), so a
+ * constantly used statement cannot be pushed out by one-shot statements.  It
+ * is reset by {@link SqlDbUtilsInit} (statements belong to one `Database`
+ * handle).
  */
 const PREPARED_STATEMENT_CACHE_MAX = 100;
 let preparedStatements = new Map<string, Database.Statement>();
 
 function prepareCached(sql: string): Database.Statement {
-  let statement = preparedStatements.get(sql);
-  if (!statement) {
-    if (preparedStatements.size >= PREPARED_STATEMENT_CACHE_MAX) {
-      const oldest = preparedStatements.keys().next().value;
-      if (oldest !== undefined) {
-        preparedStatements.delete(oldest);
-      }
-    }
-    statement = database.prepare(sql);
-    preparedStatements.set(sql, statement);
+  const cached = preparedStatements.get(sql);
+  if (cached !== undefined) {
+    // LRU: move the hit to the most-recently-used position.
+    preparedStatements.delete(sql);
+    preparedStatements.set(sql, cached);
+    return cached;
   }
+  if (preparedStatements.size >= PREPARED_STATEMENT_CACHE_MAX) {
+    const oldest = preparedStatements.keys().next().value;
+    if (oldest !== undefined) {
+      preparedStatements.delete(oldest);
+    }
+  }
+  const statement = database.prepare(sql);
+  preparedStatements.set(sql, statement);
   return statement;
 }
 

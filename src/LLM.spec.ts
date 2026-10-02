@@ -299,5 +299,27 @@ describe("LLMClient", () => {
         client.request([{ role: "user", content: "hello" }]),
       ).rejects.toThrow("Network down");
     });
+
+    it("should fall back to the axios error message when the provider payload has none", async () => {
+      const axiosError = Object.assign(new Error("Request failed 503"), {
+        isAxiosError: true,
+        response: { data: {} },
+      });
+      mockPost.mockRejectedValue(axiosError);
+      const client = createEnabledClient();
+
+      await expect(
+        client.request([{ role: "user", content: "hello" }]),
+      ).rejects.toThrow("Request failed 503");
+    });
+
+    it("should stringify non-Error rejection values", async () => {
+      mockPost.mockRejectedValue("boom-string");
+      const client = createEnabledClient();
+
+      await expect(
+        client.request([{ role: "user", content: "hello" }]),
+      ).rejects.toThrow("boom-string");
+    });
   });
 });

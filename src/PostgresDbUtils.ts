@@ -90,19 +90,30 @@ function buildPoolConfig(
  * Run a callback while holding a session-level advisory lock on the given
  * client. Replicas booting concurrently serialise on the lock instead of
  * applying the same migration twice.
+ *
+ * When a parent span is given (`context`), a `PostgresDbUtilsAdvisoryLock`
+ * span is created under it so lock waits appear in the trace of the caller.
  */
 async function withAdvisoryLockOnClient<T>(
   client: PoolClient,
   lockKey: number,
   callback: () => Promise<T>,
+  context?: Span,
 ): Promise<T> {
-  await client.query("SELECT pg_advisory_lock($1)", [lockKey]);
+  const span = context
+    ? tracer.startSpan("PostgresDbUtilsAdvisoryLock", context)
+    : undefined;
   try {
-    return await callback();
+    await client.query("SELECT pg_advisory_lock($1)", [lockKey]);
+    try {
+      return await callback();
+    } finally {
+      await client.query("SELECT pg_advisory_unlock($1)", [lockKey]).catch(() => {
+        // The connection may already be broken; the lock dies with it.
+      });
+    }
   } finally {
-    await client.query("SELECT pg_advisory_unlock($1)", [lockKey]).catch(() => {
-      // The connection may already be broken; the lock dies with it.
-    });
+    span?.end();
   }
 }
 
@@ -316,16 +327,25 @@ export class PostgresSchemaDbUtils {
    * Initialise (or replace) the shared runtime pool.
    * Typically called once with a pool whose `search_path` includes all
    * application schemas.
+   *
+   * The new pool is assigned before the previous pool is closed and the
+   * closure is awaited, so concurrent re-initialisations cannot leave a
+   * half-initialised state or an unclosed pool behind: every caller awaits
+   * a fully initialised pool.
    */
-  initRuntimePool(config: PostgresDbConfig, searchPath?: string): void {
-    if (this.runtimePool) {
-      this.runtimePool.end().catch(() => {
-        // Ignore errors on close
-      });
-    }
+  async initRuntimePool(
+    config: PostgresDbConfig,
+    searchPath?: string,
+  ): Promise<void> {
+    const previousPool = this.runtimePool;
     this.runtimePool = new Pool(
       buildPoolConfig(config, searchPath || this.schemaName, 20, true),
     );
+    if (previousPool) {
+      await previousPool.end().catch(() => {
+        // Ignore errors on close
+      });
+    }
     this.moduleLogger.info(
       `Runtime pool initialized (search_path: ${searchPath || this.schemaName})`,
     );
@@ -602,10 +622,14 @@ export async function PostgresDbUtilsInit(
  * Run a callback while holding a Postgres advisory lock, serialising the
  * callback across every replica of every service booting against the same
  * database (used for the `auth_token` and first-user bootstrap races).
+ *
+ * @param context  Optional parent span: when given, a connected
+ *                 `PostgresDbUtilsAdvisoryLock` span is created under it.
  */
 export async function PostgresDbUtilsWithAdvisoryLock<T>(
   lock: PostgresLockName,
   callback: () => Promise<T>,
+  context?: Span,
 ): Promise<T> {
   const client = await pool.connect();
   try {
@@ -613,6 +637,7 @@ export async function PostgresDbUtilsWithAdvisoryLock<T>(
       client,
       POSTGRES_LOCK_KEYS[lock],
       callback,
+      context,
     );
   } finally {
     client.release();

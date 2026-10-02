@@ -263,6 +263,28 @@ describe("SqlDbUtils prepared statement cache", () => {
     expect(prepareSpy).toHaveBeenCalledTimes(102);
   });
 
+  it("evicts least-recently-used entries, keeping a hot statement cached", () => {
+    const db = SqlDbUtilsModule.SqlDbUtilsGetDatabase();
+    const prepareSpy = jest.spyOn(db, "prepare");
+    const hotSql = "SELECT 4242 AS hot";
+
+    SqlDbUtilsModule.SqlDbUtilsQuerySQL(undefined, hotSql);
+    expect(prepareSpy).toHaveBeenCalledTimes(1);
+
+    // 120 distinct one-shot statements would evict the hot statement under
+    // FIFO even though it is re-used on every iteration.
+    for (let index = 0; index < 120; index++) {
+      SqlDbUtilsModule.SqlDbUtilsQuerySQL(undefined, `SELECT ${index} AS one_shot`);
+      SqlDbUtilsModule.SqlDbUtilsQuerySQL(undefined, hotSql);
+    }
+
+    const hotPreparations = prepareSpy.mock.calls.filter(
+      (call) => call[0] === hotSql,
+    ).length;
+    expect(hotPreparations).toBe(1);
+    expect(prepareSpy).toHaveBeenCalledTimes(121);
+  });
+
   it("does not reuse statements from a closed database handle", async () => {
     SqlDbUtilsModule.SqlDbUtilsQuerySQL(
       undefined,

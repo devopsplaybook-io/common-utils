@@ -1,8 +1,21 @@
 import {
   DbUtilsGetType,
   DbUtilsInit,
+  DbUtilsWithLock,
   convertToPostgresPlaceholders,
 } from "./DbUtils";
+import * as PostgresDbUtils from "./PostgresDbUtils";
+
+jest.mock("./PostgresDbUtils", () => ({
+  PostgresDbUtilsSetOTel: jest.fn(),
+  PostgresDbUtilsInit: jest.fn().mockResolvedValue(undefined),
+  PostgresDbUtilsGetPool: jest.fn(),
+  PostgresDbUtilsExecSQL: jest.fn(),
+  PostgresDbUtilsQuerySQL: jest.fn(),
+  PostgresDbUtilsWithAdvisoryLock: jest.fn(
+    async (_lock: string, callback: () => Promise<unknown>) => callback(),
+  ),
+}));
 
 describe("convertToPostgresPlaceholders", () => {
   it("should convert single ?", () => {
@@ -97,5 +110,49 @@ describe("DbUtilsInit", () => {
 
   it("should default to sqlite before init", () => {
     expect(DbUtilsGetType()).toBe("sqlite");
+  });
+});
+
+describe("DbUtilsWithLock", () => {
+  it("runs the callback directly on sqlite, without any advisory lock", async () => {
+    const callback = jest.fn(async () => "sqlite-result");
+
+    const result = await DbUtilsWithLock("auth_token", callback);
+
+    expect(result).toBe("sqlite-result");
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(
+      PostgresDbUtils.PostgresDbUtilsWithAdvisoryLock,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("delegates to the Postgres advisory lock with the span context", async () => {
+    await jest.isolateModulesAsync(async () => {
+      const dbUtils = require("./DbUtils") as typeof import("./DbUtils");
+      const postgresDbUtils =
+        require("./PostgresDbUtils") as typeof import("./PostgresDbUtils");
+
+      await dbUtils.DbUtilsInit(
+        undefined as never,
+        { DATABASE_TYPE: "postgres" } as never,
+        "/sql",
+      );
+
+      const context = { name: "request-span" } as never;
+      const result = await dbUtils.DbUtilsWithLock(
+        "users_bootstrap",
+        async () => "pg-result",
+        context,
+      );
+
+      expect(result).toBe("pg-result");
+      expect(
+        postgresDbUtils.PostgresDbUtilsWithAdvisoryLock,
+      ).toHaveBeenCalledWith(
+        "users_bootstrap",
+        expect.any(Function),
+        context,
+      );
+    });
   });
 });

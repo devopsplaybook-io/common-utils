@@ -246,7 +246,7 @@ await AuthDb.closeAll();
 | `new PostgresSchemaDbUtils(schemaName)`           | Create instance for a specific schema               |
 | `initOTel(tracer, logger)`                        | Inject OTel instances (shared across all instances) |
 | `initSchema(context, config, sqlDir)`             | Create schema pool and run migrations               |
-| `initRuntimePool(config)`                         | Create shared runtime pool                          |
+| `initRuntimePool(config)`                         | Create (or replace) the shared runtime pool; returns `Promise<void>` that resolves once the previous pool is closed (`config` change) |
 | `execSQL(context, sql, params?, useSchemaPool?)`  | Execute write, returns `Promise<number>`            |
 | `execSQLFile(context, filename, useSchemaPool?)`  | Execute an entire SQL file                          |
 | `querySQL(context, sql, params?, useSchemaPool?)` | Execute read, returns `Promise<any[]>`              |
@@ -444,7 +444,7 @@ fastify.register(new UsersRoutes().getRoutes, { prefix: "/api/users" });
 | `AuthHasScope`               | 403 guard: admin or credentials containing the requested scope         |
 | `AuthGetUserSession`         | Returns the `UserSession` decoded from the request credentials         |
 | `AuthJwtRevocationEnabled` / `AuthGetApiTokensMaxPerUser` | Current `JWT_REVOCATION_ENABLED` / `API_TOKENS_MAX_PER_USER` values |
-| `User`, `UserRole`, `UserScope` | User model; scopes are application-defined strings                  |
+| `User`, `UserRole`, `UserScope` | User model; scopes are application-defined strings. `User.fromJson(payload)` returns `null` when the payload is missing **or has no `id`** — it never fabricates a fresh identity for an unidentified payload |
 | `UserSession`                | Decoded session: `isAuthenticated`, `userId`, `userName`, `role`, `scopes` |
 | `UserApiToken`               | API token model (only the SHA-256 hash is persisted)                   |
 | `UserPasswordSetPassword` / `UserPasswordCheckPassword` | bcrypt hashing and verification             |
@@ -476,10 +476,28 @@ SQL is written SQLite-first; the `DbUtils` facade converts placeholders for Post
 #### `SystemCommand` -- Shell Command Execution
 
 ```ts
-import { SystemCommandExecute } from "@devopsplaybook.io/common-utils";
+import {
+  SystemCommandExecute,
+  SystemCommandExecuteWithOutput,
+  SystemCommandExecFile,
+} from "@devopsplaybook.io/common-utils";
 
 const output = await SystemCommandExecute("ls -la /tmp", { cwd: "/home" });
+
+// Both output streams (stdout + stderr):
+const { stdout, stderr } = await SystemCommandExecuteWithOutput("make build");
+
+// No shell: arguments are passed verbatim (safe for user-controlled values):
+const listing = await SystemCommandExecFile("ls", ["-la", userPath]);
 ```
+
+| Export                         | Description                                                                  |
+| ------------------------------ | ---------------------------------------------------------------------------- |
+| `SystemCommandExecute`         | Run a shell command, resolves stdout; on failure the rejection error carries the captured `stdout`/`stderr` |
+| `SystemCommandExecuteWithOutput` | Same, but resolves `{ stdout, stderr }`                                    |
+| `SystemCommandExecFile`        | Run an executable **without a shell** with literal arguments (no metacharacter interpretation), resolves stdout |
+
+> **Security**: `SystemCommandExecute` and `SystemCommandExecuteWithOutput` run the command string through a shell — **never interpolate untrusted input** (user input, request payloads, stored values) into it. Use `SystemCommandExecFile` for user-controlled values.
 
 #### `Timeout` -- Promise-based Delay
 

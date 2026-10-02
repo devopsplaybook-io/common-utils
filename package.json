@@ -1,6 +1,6 @@
 {
   "name": "@devopsplaybook.io/common-utils",
-  "version": "1.12.2",
+  "version": "1.13.0",
   "description": "Shared utility modules for devopsplaybook.io projects (DB, Config, OTel context, auth/users, notifications, LLM, system helpers)",
   "keywords": [
     "Open Telemetry",
@@ -99,6 +99,7 @@
   "devDependencies": {
     "@swc/core": "^1.16.13",
     "@swc/jest": "^0.2.39",
+    "@testcontainers/postgresql": "^12.2.0",
     "@types/bcrypt": "^6.0.0",
     "@types/better-sqlite3": "^9.6.0",
     "@types/fs-extra": "^11.0.4",
@@ -109,6 +110,7 @@
     "@types/uuid": "^11.0.0",
     "jest": "^30.5.2",
     "oxlint": "^1.86.0",
+    "testcontainers": "^12.2.0",
     "typescript": "^7.0.2"
   },
   "publishConfig": {

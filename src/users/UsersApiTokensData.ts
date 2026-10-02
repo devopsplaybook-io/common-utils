@@ -8,9 +8,11 @@ let tracer: StandardTracer;
 /**
  * Whether the optional `expiresAt` / `lastUsedAt` columns exist. Probed once
  * per process so a database that did not run the documented migration never
- * breaks the auth path.
+ * breaks the auth path: one shared in-flight promise is awaited by every
+ * caller, so concurrent first calls cannot run the probe twice or observe
+ * contradicting results. A failed probe is sticky (`false`).
  */
-let optionalColumnsAvailable: boolean | null = null;
+let optionalColumnsProbe: Promise<boolean> | null = null;
 
 /**
  * Injects the OTel tracer instance used by the API tokens data module.
@@ -27,18 +29,24 @@ export function UsersApiTokensDataSetOTel(tracerIn: StandardTracer): void {
 export async function UsersApiTokensDataSupportsOptionalColumns(
   context: Span | undefined,
 ): Promise<boolean> {
-  if (optionalColumnsAvailable === null) {
-    try {
-      await DbUtilsQuerySQL(
-        context,
-        'SELECT "expiresAt" FROM users_api_tokens LIMIT 1',
-      );
-      optionalColumnsAvailable = true;
-    } catch {
-      optionalColumnsAvailable = false;
-    }
+  if (!optionalColumnsProbe) {
+    optionalColumnsProbe = probeOptionalColumns(context);
   }
-  return optionalColumnsAvailable;
+  return optionalColumnsProbe;
+}
+
+async function probeOptionalColumns(
+  context: Span | undefined,
+): Promise<boolean> {
+  try {
+    await DbUtilsQuerySQL(
+      context,
+      'SELECT "expiresAt" FROM users_api_tokens LIMIT 1',
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function UsersApiTokensDataGet(
