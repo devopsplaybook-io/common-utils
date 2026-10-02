@@ -2,6 +2,7 @@ import { execSync } from "child_process";
 import * as nodeFs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { Pool } from "pg";
 import { StandardLogger, StandardTracer } from "@devopsplaybook.io/otel-utils";
 import {
   PostgreSqlContainer,
@@ -104,6 +105,30 @@ async function endCurrentPool(): Promise<void> {
   }
 }
 
+/**
+ * Drop and recreate the schemas used by the tests. The container hosts one
+ * database shared by the whole file and applied migration versions persist in
+ * `metadata`, so without this a later test's migration set (different files
+ * under the same version numbers) would be skipped as "already applied".
+ */
+async function resetDatabase(): Promise<void> {
+  const resetPool = new Pool({
+    host: container.getHost(),
+    port: container.getPort(),
+    user: container.getUsername(),
+    password: container.getPassword(),
+    database: container.getDatabase(),
+  });
+  try {
+    await resetPool.query(
+      "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; " +
+        "DROP SCHEMA IF EXISTS integration_app CASCADE;",
+    );
+  } finally {
+    await resetPool.end();
+  }
+}
+
 describeWithDocker("PostgresDbUtils integration (real PostgreSQL)", () => {
   beforeAll(async () => {
     container = await new PostgreSqlContainer("postgres:18").start();
@@ -115,7 +140,8 @@ describeWithDocker("PostgresDbUtils integration (real PostgreSQL)", () => {
     await container?.stop();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    await resetDatabase();
     baseDir = nodeFs.mkdtempSync(path.join(os.tmpdir(), "pg-integration-"));
     sqlDir = path.join(baseDir, "sql");
     nodeFs.mkdirSync(sqlDir, { recursive: true });
