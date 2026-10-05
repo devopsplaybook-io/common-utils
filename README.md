@@ -557,7 +557,7 @@ The `.github/workflows/` directory contains **reusable workflows** that other re
 | **NPM PR**      | `reusable-npm-pr.yml`      | `workflow_call` | Lint, test, and build on PR. Publishes a **beta** version tagged `beta` and comments the PR with install instructions.                                        |
 | **NPM Upgrade** | `reusable-npm-upgrade.yml` | `workflow_call` | Runs `npm-check-updates -u`, bumps the patch version, and opens a PR. Supports monorepo sub-folders via `npm_services` input.                                 |
 | **PR Verify**   | `reusable-pr-verify.yml`   | `workflow_call` | Matrix build/lint/test for multiple Node.js apps, plus a multi-platform Docker build pushed as `beta-pr-<PR number>` and `beta`. For monorepos with Docker images. |
-| **Merge Build** | `reusable-merge-build.yml` | `workflow_call` | Promotes the image validated by the merged PR to the `latest`, version, major and minor tags. Runs no build, lint or test.                                      |
+| **Merge Build** | `reusable-merge-build.yml` | `workflow_call` | Promotes the image validated by the merged PR to the `latest`, `beta`, version, major and minor tags. Runs no build, lint or test.                                      |
 
 ### Inputs and Secrets
 
@@ -607,7 +607,7 @@ Docker images are built **once**, on the pull request, and **promoted** on merge
 | Stage            | Workflow               | Registry tags written                                                                                       |
 | ---------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------- |
 | Pull request     | `reusable-pr-verify`   | `beta-pr-<PR number>` (identifies this PR's artifact) and `beta` (moving pointer to the latest PR build)     |
-| Merge to default | `reusable-merge-build` | `<version>`, `<major>`, `<minor>` and `latest`, copied from `beta-pr-<PR number>`                            |
+| Merge to default | `reusable-merge-build` | `<version>`, `<major>`, `<minor>`, `beta` and `latest`, copied from `beta-pr-<PR number>`                            |
 
 On merge the workflow:
 
