@@ -150,6 +150,7 @@ jobs:
           echo "  -> ${RELEASE_IMAGE}:${MAJOR}"
           echo "  -> ${RELEASE_IMAGE}:${MINOR}"
           echo "  -> ${RELEASE_IMAGE}:latest"
+          echo "  -> ${RELEASE_IMAGE}:beta"
 
           # --prefer-index=false forces a carbon copy of the source manifest, so
           # the released image keeps the exact digest validated on the pull
@@ -161,11 +162,12 @@ jobs:
             -t "${RELEASE_IMAGE}:${MAJOR}" \
             -t "${RELEASE_IMAGE}:${MINOR}" \
             -t "${RELEASE_IMAGE}:latest" \
+            -t "${RELEASE_IMAGE}:beta" \
             "${SOURCE_IMAGE}"
 
           # Fail loudly rather than publish an artifact that differs from the one
           # tested on the pull request.
-          for TAG in "${RELEASE_VERSION}" "${MAJOR}" "${MINOR}" "latest"; do
+          for TAG in "${RELEASE_VERSION}" "${MAJOR}" "${MINOR}" "latest" "beta"; do
             PROMOTED_DIGEST=$(docker buildx imagetools inspect "${RELEASE_IMAGE}:${TAG}" --format '{{.Manifest.Digest}}')
             if [ "${PROMOTED_DIGEST}" != "${SOURCE_DIGEST}" ]; then
               echo "::error::${RELEASE_IMAGE}:${TAG} has digest ${PROMOTED_DIGEST}, expected ${SOURCE_DIGEST}"
@@ -194,4 +196,5 @@ jobs:
             -t "${RELEASE_IMAGE}:${RELEASE_VERSION}" \
             -t "${RELEASE_IMAGE}:${MAJOR}" \
             -t "${RELEASE_IMAGE}:${MINOR}" \
+            -t "${RELEASE_IMAGE}:beta" \
             .
