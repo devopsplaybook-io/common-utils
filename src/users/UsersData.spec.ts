@@ -50,6 +50,7 @@ const mockTracer = {
       name,
       end: jest.fn(),
       addEvent: jest.fn(),
+      setAttributes: jest.fn(),
       setStatus: jest.fn(),
     };
     mockSpans.push(span);

@@ -11,6 +11,7 @@ const mockTracer = {
       name,
       end: jest.fn(),
       addEvent: jest.fn(),
+      setAttributes: jest.fn(),
       setStatus: jest.fn(),
     };
     mockSpans.push(span);
@@ -210,6 +211,108 @@ describe("SqlDbUtilsExecSQL / SqlDbUtilsQuerySQL", () => {
     expect(
       typeof (SqlDbUtilsModule.SqlDbUtilsGetDatabase() as any).prepare,
     ).toBe("function");
+  });
+});
+
+describe("SqlDbUtils span attributes", () => {
+  beforeEach(async () => {
+    writeMigrations(migrationSet(1));
+    await initDb();
+    mockSpans.length = 0;
+  });
+
+  /** Merged attributes recorded across all `setAttributes` calls of a span. */
+  function spanAttributes(spanName: string): Record<string, unknown> {
+    const span = mockSpans.find((candidate) => candidate.name === spanName);
+    const attributes: Record<string, unknown> = {};
+    for (const call of span.setAttributes.mock.calls) {
+      Object.assign(attributes, call[0]);
+    }
+    return attributes;
+  }
+
+  it("records db.system, db.statement and db.rows_returned on query spans", () => {
+    SqlDbUtilsModule.SqlDbUtilsQuerySQL(
+      undefined,
+      "SELECT version FROM applied_log WHERE version = ?",
+      [1],
+    );
+
+    const attributes = spanAttributes("SqlDbUtilsQuerySQL");
+    expect(attributes["db.system"]).toBe("sqlite");
+    expect(attributes["db.statement"]).toBe(
+      "SELECT version FROM applied_log WHERE version = ?",
+    );
+    expect(attributes["db.rows_returned"]).toBe(1);
+    expect(allSpansEnded()).toBe(true);
+  });
+
+  it("records db.system, db.statement and db.rows_affected on exec spans", () => {
+    SqlDbUtilsModule.SqlDbUtilsExecSQL(
+      undefined,
+      "INSERT INTO applied_log (version) VALUES (?)",
+      [7],
+    );
+
+    const attributes = spanAttributes("SqlDbUtilsExecSQL");
+    expect(attributes["db.system"]).toBe("sqlite");
+    expect(attributes["db.statement"]).toBe(
+      "INSERT INTO applied_log (version) VALUES (?)",
+    );
+    expect(attributes["db.rows_affected"]).toBe(1);
+    const execSpan = mockSpans.find(
+      (span) => span.name === "SqlDbUtilsExecSQL",
+    );
+    expect(execSpan.addEvent).toHaveBeenCalledWith("Impacted Rows: 1");
+    expect(allSpansEnded()).toBe(true);
+  });
+
+  it("records db.system, db.statement and db.sql.file on file-exec spans", () => {
+    const filename = path.join(sqlDir, "attributed.sql");
+    nodeFs.writeFileSync(filename, "INSERT INTO applied_log (version) VALUES (42);");
+
+    SqlDbUtilsModule.SqlDbUtilsExecSQLFile(undefined as never, filename);
+
+    const attributes = spanAttributes("SqlDbUtilsExecSQLFile");
+    expect(attributes["db.system"]).toBe("sqlite");
+    expect(attributes["db.statement"]).toBe(
+      "INSERT INTO applied_log (version) VALUES (42);",
+    );
+    expect(attributes["db.sql.file"]).toBe(filename);
+    expect(allSpansEnded()).toBe(true);
+  });
+
+  it("truncates oversized statements on db.statement", () => {
+    const oversizedSql = `SELECT '${"x".repeat(5000)}' AS padding`;
+
+    SqlDbUtilsModule.SqlDbUtilsQuerySQL(undefined, oversizedSql);
+
+    const attributes = spanAttributes("SqlDbUtilsQuerySQL");
+    expect(String(attributes["db.statement"]).length).toBe(4096);
+    expect(oversizedSql.startsWith(String(attributes["db.statement"]))).toBe(
+      true,
+    );
+  });
+
+  it("records the statement attributes before an error status", () => {
+    expect(() =>
+      SqlDbUtilsModule.SqlDbUtilsQuerySQL(
+        undefined,
+        "SELECT * FROM missing_table",
+      ),
+    ).toThrow("missing_table");
+
+    const querySpan = mockSpans.find(
+      (span) => span.name === "SqlDbUtilsQuerySQL",
+    );
+    const attributes = spanAttributes("SqlDbUtilsQuerySQL");
+    expect(attributes["db.system"]).toBe("sqlite");
+    expect(attributes["db.statement"]).toBe("SELECT * FROM missing_table");
+    expect(attributes["db.rows_returned"]).toBeUndefined();
+    expect(querySpan.setAttributes.mock.invocationCallOrder[0]).toBeLessThan(
+      querySpan.setStatus.mock.invocationCallOrder[0],
+    );
+    expect(allSpansEnded()).toBe(true);
   });
 });
 
