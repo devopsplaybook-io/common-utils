@@ -43,6 +43,7 @@ const mockTracer = {
   startSpan: jest.fn(() => ({
     end: jest.fn(),
     addEvent: jest.fn(),
+    setAttributes: jest.fn(),
     setStatus: jest.fn(),
   })),
 } as unknown as StandardTracer;

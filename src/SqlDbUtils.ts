@@ -30,6 +30,19 @@ let logger: ModuleLogger;
 const PREPARED_STATEMENT_CACHE_MAX = 100;
 let preparedStatements = new Map<string, Database.Statement>();
 
+/**
+ * Cap applied to the `db.statement` span attribute: statements contain only
+ * `?` placeholders, so truncation is the sanitization — it keeps huge
+ * generated SQL (long IN lists, migration files) from flooding trace data.
+ */
+const DB_STATEMENT_MAX_LENGTH = 4096;
+
+function truncateDbStatement(sql: string): string {
+  return sql.length <= DB_STATEMENT_MAX_LENGTH
+    ? sql
+    : sql.slice(0, DB_STATEMENT_MAX_LENGTH);
+}
+
 function prepareCached(sql: string): Database.Statement {
   const cached = preparedStatements.get(sql);
   if (cached !== undefined) {
@@ -145,8 +158,13 @@ export function SqlDbUtilsExecSQL(
 ): number {
   const span = tracer.startSpan("SqlDbUtilsExecSQL", context);
   try {
+    span.setAttributes({
+      "db.system": "sqlite",
+      "db.statement": truncateDbStatement(sql),
+    });
     const stmt = prepareCached(sql);
     const result = stmt.run(params);
+    span.setAttributes({ "db.rows_affected": result.changes });
     span.addEvent(`Impacted Rows: ${result.changes}`);
     return result.changes;
   } catch (error) {
@@ -166,6 +184,11 @@ export function SqlDbUtilsExecSQLFile(context: Span, filename: string): void {
   const span = tracer.startSpan("SqlDbUtilsExecSQLFile", context);
   try {
     const sql = fs.readFileSync(filename).toString();
+    span.setAttributes({
+      "db.system": "sqlite",
+      "db.statement": truncateDbStatement(sql),
+      "db.sql.file": filename,
+    });
     database.exec(sql);
   } catch (error) {
     const err = error as Error;
@@ -187,12 +210,17 @@ export function SqlDbUtilsQuerySQL(
   debug = false,
 ): any[] {
   const span = tracer.startSpan("SqlDbUtilsQuerySQL", context);
+  span.setAttributes({
+    "db.system": "sqlite",
+    "db.statement": truncateDbStatement(sql),
+  });
   if (debug) {
     console.log(sql);
   }
   try {
     const stmt = prepareCached(sql);
     const rows = stmt.all(params);
+    span.setAttributes({ "db.rows_returned": rows.length });
     return rows;
   } catch (error) {
     const err = error as Error;
