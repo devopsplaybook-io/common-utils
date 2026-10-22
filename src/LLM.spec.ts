@@ -287,8 +287,34 @@ describe("LLMClient", () => {
       ).rejects.toThrow("Invalid API key");
       expect(mockLogger.error).toHaveBeenCalledWith(
         "LLMClient: request failed (Invalid API key)",
-        axiosError,
+        { name: "Error", message: "Request failed 401" },
       );
+    });
+
+    it("should never log the request config or Authorization header", async () => {
+      const axiosError = Object.assign(new Error("Request failed 401"), {
+        isAxiosError: true,
+        code: "ERR_BAD_REQUEST",
+        config: { headers: { Authorization: "Bearer super-secret-key" } },
+        response: { status: 401, data: { error: { message: "Invalid API key" } } },
+      });
+      mockPost.mockRejectedValue(axiosError);
+      const client = createEnabledClient();
+
+      await expect(
+        client.request([{ role: "user", content: "hello" }]),
+      ).rejects.toThrow("Invalid API key");
+
+      const logged = mockLogger.error.mock.calls[0][1];
+      expect(logged).toEqual({
+        name: "Error",
+        message: "Request failed 401",
+        status: 401,
+        code: "ERR_BAD_REQUEST",
+      });
+      expect(JSON.stringify(logged)).not.toContain("super-secret-key");
+      expect(JSON.stringify(logged)).not.toContain("Authorization");
+      expect(JSON.stringify(logged)).not.toContain("config");
     });
 
     it("should keep the original message for non-provider errors", async () => {

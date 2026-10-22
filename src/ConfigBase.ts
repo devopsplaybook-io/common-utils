@@ -71,7 +71,7 @@ export interface ConfigCommonInterface
  * are already typed correctly (config file JSON) pass through unchanged; when
  * the default is a string or there is no default, the value is returned as-is.
  */
-function coerceValue(value: unknown, defaultValue: any): any {
+function coerceValue(value: unknown, defaultValue: any, field: string): any {
   if (typeof value !== "string") {
     return value;
   }
@@ -81,33 +81,41 @@ function coerceValue(value: unknown, defaultValue: any): any {
 
   switch (typeof defaultValue) {
     case "number": {
-      const parsed = Number(value);
-      return Number.isNaN(parsed) ? value : parsed;
+      const trimmed = value.trim();
+      const parsed = Number(trimmed);
+      if (trimmed === "" || !Number.isFinite(parsed)) {
+        throw new Error(
+          `Invalid numeric value for ${field}: "${value}" (a finite number is required)`,
+        );
+      }
+      return parsed;
     }
     case "boolean": {
-      return value === "true" || value === "1" || value === "yes";
+      const normalized = value.trim().toLowerCase();
+      if (["true", "1", "yes"].includes(normalized)) {
+        return true;
+      }
+      if (["false", "0", "no"].includes(normalized)) {
+        return false;
+      }
+      throw new Error(
+        `Invalid boolean value for ${field}: "${value}" (expected true/false, 1/0 or yes/no)`,
+      );
     }
     case "object": {
-      if (Array.isArray(defaultValue)) {
-        try {
-          return JSON.parse(value);
-        } catch {
-          return value;
-        }
+      try {
+        return JSON.parse(value);
+      } catch {
+        throw new Error(`Invalid JSON value for ${field}: "${value}"`);
       }
-      if (defaultValue !== null) {
-        try {
-          return JSON.parse(value);
-        } catch {
-          return value;
-        }
-      }
-      return value;
     }
     default:
       return value;
   }
 }
+
+/** Cached library version; the manifest is read at most once per process. */
+let detectedVersion: string | undefined;
 
 /**
  * Abstract base class for project configuration.
@@ -265,6 +273,9 @@ export abstract class ConfigBase implements ConfigCommonInterface {
    * back to `"1"` when neither resolves to this package.
    */
   private static detectVersion(): string {
+    if (detectedVersion !== undefined) {
+      return detectedVersion;
+    }
     for (const candidate of [
       path.resolve(__dirname, "../../package.json"),
       path.resolve(__dirname, "../package.json"),
@@ -272,13 +283,16 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       try {
         const pkg = fse.readJsonSync(candidate);
         if (pkg && pkg.name === "@devopsplaybook.io/common-utils" && pkg.version) {
-          return pkg.version;
+          const version = String(pkg.version);
+          detectedVersion = version;
+          return version;
         }
       } catch {
         // try the next candidate
       }
     }
-    return "1";
+    detectedVersion = "1";
+    return detectedVersion;
   }
 
   /**
@@ -286,6 +300,17 @@ export abstract class ConfigBase implements ConfigCommonInterface {
    * Call this in your subclass constructor for every project-specific field.
    */
   public addConfigField(def: ConfigFieldDef): void {
+    const existing = this._fields.find((entry) => entry.field === def.field);
+    if (existing) {
+      // Re-registering a field (e.g. to add an alias) must never drop the
+      // `sensitive` flag of the base registration and unmask the value in logs.
+      existing.sensitive = existing.sensitive || (def.sensitive ?? false);
+      existing.envAliases = [
+        ...new Set([...existing.envAliases, ...(def.envAliases ?? [])]),
+      ];
+      existing.defaultValue = (this as any)[def.field];
+      return;
+    }
     this._fields.push({
       field: def.field,
       sensitive: def.sensitive ?? false,
@@ -306,9 +331,16 @@ export abstract class ConfigBase implements ConfigCommonInterface {
     let content: Record<string, unknown> = {};
     try {
       content = await fse.readJson(this.CONFIG_FILE);
-      // eslint-disable-next-line no-unused-vars -- catch binding kept so dist/ stays byte-identical to the TS6 build
-    } catch (_e) {
-      // config file is optional – fall back to env + defaults
+    } catch (error) {
+      // A missing file is the normal "env + defaults" configuration. A file
+      // that exists but cannot be read or parsed is almost always a mistake:
+      // surface it instead of silently starting with defaults.
+      const code = (error as { code?: string })?.code;
+      if (code !== "ENOENT") {
+        log(
+          `Configuration file ${this.CONFIG_FILE} could not be read (${(error as Error).message}); using environment and defaults`,
+        );
+      }
     }
 
     log(`Configuration Value: CONFIG_FILE: ${this.CONFIG_FILE}`);
@@ -341,13 +373,13 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       // 3. Apply environment value (full name or alias) if found,
       //    coercing strings to match the default value type
       if (foundValue !== undefined) {
-        (this as any)[field] = coerceValue(foundValue, defaultValue);
+        (this as any)[field] = coerceValue(foundValue, defaultValue, field);
       }
 
       // 4. Config file override (environment always wins, but if neither
       //    environment nor alias matched, check config file)
       if (foundValue === undefined && content[field] !== undefined) {
-        (this as any)[field] = coerceValue(content[field], defaultValue);
+        (this as any)[field] = coerceValue(content[field], defaultValue, field);
         from = "config";
       }
 

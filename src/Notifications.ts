@@ -1,4 +1,5 @@
 import axios, { AxiosInstance } from "axios";
+import { sanitizeHttpError } from "./HttpError";
 
 /**
  * Severity levels for notifications.
@@ -147,9 +148,11 @@ export class NotificationsClient {
       });
       return response.data;
     } catch (err) {
+      // Never hand the raw AxiosError to the logger: its `config` carries the
+      // Authorization header (and thus the API token).
       this.logger.error(
         "NotificationsClient: failed to send notification",
-        err,
+        sanitizeHttpError(err),
       );
       return null;
     }

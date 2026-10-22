@@ -39,6 +39,8 @@ npm install @devopsplaybook.io/common-utils
 | `jsonwebtoken`                          | JWT signing/verification for the auth module           |
 | `fastify`                               | HTTP framework types for the users routes              |
 
+**Node.js >= 22.12 is required** (`engines.node`): `uuid` v14 ships as ESM-only and this package is CommonJS, so `require("uuid")` relies on Node's `require(esm)` support, available from 22.12.
+
 `fastify` is kept as a regular dependency (not a peer dependency) because `UsersRoutes` is typed against its `FastifyInstance` / `RequestGenericInterface` types: apps that register the routes already have fastify, and apps that don't use the routes must not be forced to add it.
 
 `@devopsplaybook.io/otel-utils-fastify` is a regular dependency for the same reason: `UsersRoutes` resolves the request span with its `OTelRequestSpan(req)`, which reads the span map populated by the library's Fastify hooks. The lookup needs the application and `common-utils` to share a single physical copy of that package; compatible `^1.x` ranges in both are deduped by npm, so a pinned older copy must be avoided.
@@ -142,7 +144,7 @@ await config.reload();
 | `DATABASE_POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS` | `0` (disabled)                      | No                                  |
 | All `OPENTELEMETRY_COLLECTOR_*` fields            | Various                              | No (except `_AUTHORIZATION_HEADER`) |
 
-`VERSION` is detected from the library's own `package.json` (correct also for the published layout) and can be overridden like any other field via the `VERSION` environment variable or the config file. `SERVICE_ID` can be overridden the same way. Values loaded from the environment or the config file are coerced to the type of the default value (numbers, booleans, arrays), so `"DATABASE_POSTGRES_PORT": "5433"` in `config.json` is applied as the number `5433`. An unsupported `DATABASE_TYPE` makes `DbUtilsInit` reject with an explicit error.
+`VERSION` is detected from the library's own `package.json` (correct also for the published layout, read once per process) and can be overridden like any other field via the `VERSION` environment variable or the config file. `SERVICE_ID` can be overridden the same way. Values loaded from the environment or the config file are coerced to the type of the default value (numbers, booleans, arrays), so `"DATABASE_POSTGRES_PORT": "5433"` in `config.json` is applied as the number `5433`. Boolean strings are case-insensitive (`true/false`, `1/0`, `yes/no`); an invalid number, boolean or JSON value rejects `reload()` with an explicit error instead of silently keeping a string or disabling a feature. Re-registering an existing field through `addConfigField` merges aliases and never drops its `sensitive` flag. A config file that exists but cannot be read or parsed is logged (a missing file is normal and stays silent). An unsupported `DATABASE_TYPE` makes `DbUtilsInit` reject with an explicit error.
 
 `JWT_KEY` defaults to an empty string, which means **DB-managed**: `AuthInit` loads the key from `metadata.auth_token` and generates/persists one when absent. A non-empty value from the environment or the config file always takes precedence and is never written to the database (see the auth section for precedence and rotation).
 

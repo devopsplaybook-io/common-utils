@@ -75,7 +75,7 @@
     "dist"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.12"
   },
   "scripts": {
     "build": "tsc && tsc -p tsconfig.spec.json --noEmit",

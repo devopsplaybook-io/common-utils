@@ -82,11 +82,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ steps.branch.outputs.name }}
+          NPM_SERVICES: ${{ inputs.npm_services }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "${BRANCH}"
-          git add -A
+          # Stage only the manifests the update may modify, never unrelated
+          # files that happen to exist in the workspace.
+          PACKAGE_PATHS="package.json package-lock.json"
+          for FOLDER in $(echo "${NPM_SERVICES}" | jq -r '.[]'); do
+            for FILE in package.json package-lock.json; do
+              if [ -f "${FOLDER}/${FILE}" ]; then
+                PACKAGE_PATHS="${PACKAGE_PATHS} ${FOLDER}/${FILE}"
+              fi
+            done
+          done
+          git add ${PACKAGE_PATHS}
           git commit -m "chore: update NPM dependencies"
           git push origin "${BRANCH}"
           gh pr create \

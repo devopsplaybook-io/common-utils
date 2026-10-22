@@ -1,4 +1,5 @@
 import axios, { AxiosInstance } from "axios";
+import { sanitizeHttpError } from "./HttpError";
 
 /**
  * A single chat message in OpenAI-compatible format.
@@ -183,7 +184,12 @@ export class LLMClient {
       };
     } catch (err) {
       const message = this.extractErrorMessage(err);
-      this.logger.error(`LLMClient: request failed (${message})`, err);
+      // Never hand the raw AxiosError to the logger: its `config` carries the
+      // Authorization header (and thus the API key).
+      this.logger.error(
+        `LLMClient: request failed (${message})`,
+        sanitizeHttpError(err),
+      );
       throw new Error(message, { cause: err });
     }
   }

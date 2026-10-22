@@ -199,8 +199,36 @@ describe("NotificationsClient", () => {
       expect(result).toBeNull();
       expect(mockLogger.error).toHaveBeenCalledWith(
         "NotificationsClient: failed to send notification",
-        failure,
+        { name: "Error", message: "network down" },
       );
+    });
+
+    it("should never log the request config or Authorization header", async () => {
+      const client = new NotificationsClient({
+        apiEndpoint: "http://localhost/api/notifications",
+        apiToken: "super-secret-token",
+        logger: mockLogger,
+      });
+      const failure = Object.assign(new Error("Request failed 500"), {
+        isAxiosError: true,
+        code: "ERR_BAD_RESPONSE",
+        config: { headers: { Authorization: "Bearer super-secret-token" } },
+        response: { status: 500 },
+      });
+      mockPost.mockRejectedValue(failure);
+
+      await client.send({ title: "Test" });
+
+      const logged = mockLogger.error.mock.calls[0][1];
+      expect(logged).toEqual({
+        name: "Error",
+        message: "Request failed 500",
+        status: 500,
+        code: "ERR_BAD_RESPONSE",
+      });
+      expect(JSON.stringify(logged)).not.toContain("super-secret-token");
+      expect(JSON.stringify(logged)).not.toContain("Authorization");
+      expect(JSON.stringify(logged)).not.toContain("config");
     });
 
     it("should not reject when the request fails", async () => {
