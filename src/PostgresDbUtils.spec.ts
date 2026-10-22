@@ -29,6 +29,7 @@ jest.mock("pg", () => ({
 
 import {
   POSTGRES_LOCK_KEYS,
+  PostgresAdvisoryLockKey,
   PostgresDbConfig,
   PostgresDbUtilsExecSQL,
   PostgresDbUtilsExecSQLFile,
@@ -295,6 +296,32 @@ describe("PostgresDbUtilsInit migrations", () => {
   });
 });
 
+describe("PostgresAdvisoryLockKey", () => {
+  it("keeps the exact historical keys for the known names", () => {
+    expect(PostgresAdvisoryLockKey("migration")).toBe(0x6d696772);
+    expect(PostgresAdvisoryLockKey("auth_token")).toBe(0x61757468);
+    expect(PostgresAdvisoryLockKey("users_bootstrap")).toBe(0x75736572);
+  });
+
+  it("derives a deterministic 32-bit key for arbitrary names", () => {
+    const first = PostgresAdvisoryLockKey(
+      "restic-secrets-manager:project-sync:abc",
+    );
+    const second = PostgresAdvisoryLockKey(
+      "restic-secrets-manager:project-sync:abc",
+    );
+    const other = PostgresAdvisoryLockKey(
+      "restic-secrets-manager:project-sync:def",
+    );
+
+    expect(first).toBe(second);
+    expect(other).not.toBe(first);
+    expect(Number.isInteger(first)).toBe(true);
+    expect(first).toBeGreaterThanOrEqual(0);
+    expect(first).toBeLessThanOrEqual(0xffffffff);
+  });
+});
+
 describe("PostgresDbUtilsWithAdvisoryLock", () => {
   beforeEach(async () => {
     setupFakeMetadataTable([99]);
@@ -333,6 +360,40 @@ describe("PostgresDbUtilsWithAdvisoryLock", () => {
     expect(mockClientQuery).toHaveBeenCalledWith(
       "SELECT pg_advisory_unlock($1)",
       [POSTGRES_LOCK_KEYS.auth_token],
+    );
+    expect(mockClientRelease).toHaveBeenCalledTimes(1);
+  });
+
+  it("locks arbitrary names with the derived key and releases them", async () => {
+    const lockName = "restic-secrets-manager:project-sync:abc";
+    const expectedKey = PostgresAdvisoryLockKey(lockName);
+
+    await PostgresDbUtilsWithAdvisoryLock(lockName, async () => "done");
+
+    expect(mockClientQuery).toHaveBeenCalledWith(
+      "SELECT pg_advisory_lock($1)",
+      [expectedKey],
+    );
+    expect(mockClientQuery).toHaveBeenCalledWith(
+      "SELECT pg_advisory_unlock($1)",
+      [expectedKey],
+    );
+    expect(mockClientRelease).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases arbitrary names when the callback rejects", async () => {
+    const lockName = "restic-secrets-manager:project-sync:abc";
+    const expectedKey = PostgresAdvisoryLockKey(lockName);
+
+    await expect(
+      PostgresDbUtilsWithAdvisoryLock(lockName, async () => {
+        throw new Error("timed out");
+      }),
+    ).rejects.toThrow("timed out");
+
+    expect(mockClientQuery).toHaveBeenCalledWith(
+      "SELECT pg_advisory_unlock($1)",
+      [expectedKey],
     );
     expect(mockClientRelease).toHaveBeenCalledTimes(1);
   });

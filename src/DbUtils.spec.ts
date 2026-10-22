@@ -155,4 +155,29 @@ describe("DbUtilsWithLock", () => {
       );
     });
   });
+
+  it("forwards an arbitrary lock name to the Postgres advisory lock", async () => {
+    await jest.isolateModulesAsync(async () => {
+      const dbUtils = require("./DbUtils") as typeof import("./DbUtils");
+      const postgresDbUtils =
+        require("./PostgresDbUtils") as typeof import("./PostgresDbUtils");
+
+      await dbUtils.DbUtilsInit(
+        undefined as never,
+        { DATABASE_TYPE: "postgres" } as never,
+        "/sql",
+      );
+
+      const lockName = "restic-secrets-manager:project-sync:abc";
+      const result = await dbUtils.DbUtilsWithLock(
+        lockName,
+        async () => "pg-result",
+      );
+
+      expect(result).toBe("pg-result");
+      expect(
+        postgresDbUtils.PostgresDbUtilsWithAdvisoryLock,
+      ).toHaveBeenCalledWith(lockName, expect.any(Function), undefined);
+    });
+  });
 });
