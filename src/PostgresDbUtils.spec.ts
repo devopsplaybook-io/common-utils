@@ -36,6 +36,7 @@ import {
   PostgresDbUtilsInit,
   PostgresDbUtilsQuerySQL,
   PostgresDbUtilsSetOTel,
+  PostgresDbUtilsTransaction,
   PostgresDbUtilsTransactionCommit,
   PostgresDbUtilsTransactionStart,
   PostgresDbUtilsWithAdvisoryLock,
@@ -55,6 +56,7 @@ const mockTracer = {
       parentContext: context,
       end: jest.fn(),
       setStatus: jest.fn(),
+      setAttributes: jest.fn(),
       addEvent: jest.fn(),
     };
     mockSpans.push(span);
@@ -294,6 +296,63 @@ describe("PostgresDbUtilsInit migrations", () => {
     expect(config.statement_timeout).toBeUndefined();
     expect(config.idle_in_transaction_session_timeout).toBeUndefined();
   });
+
+  it("ignores files whose names only contain init-NNNN.sql", async () => {
+    mockReaddir.mockResolvedValue([
+      "init-0000.sql",
+      "backup-init-0005.sql",
+      "init-0006.sql.bak",
+      "init-0007.sql",
+    ]);
+    setupFakeMetadataTable([0]);
+
+    await PostgresDbUtilsInit(undefined as never, makeConfig(), "/sql");
+
+    const statements = executedSql();
+    expect(statements).toContain("SQL:/sql/init-0007.sql");
+    expect(statements).not.toContain("SQL:/sql/backup-init-0005.sql");
+    expect(statements).not.toContain("SQL:/sql/init-0006.sql.bak");
+  });
+
+  it("closes the previous pool when re-initialised", async () => {
+    setupFakeMetadataTable([99]);
+    await PostgresDbUtilsInit(undefined as never, makeConfig(), "/sql");
+    const firstPool = functionalPool();
+
+    await PostgresDbUtilsInit(undefined as never, makeConfig(), "/sql");
+
+    expect(firstPool.end).toHaveBeenCalledTimes(1);
+    expect(functionalPool()).not.toBe(firstPool);
+  });
+});
+
+describe("Postgres schema name validation", () => {
+  it("rejects a schema name that is not a plain identifier", () => {
+    expect(() => new PostgresSchemaDbUtils("good_schema")).not.toThrow();
+    expect(() => new PostgresSchemaDbUtils("bad schema")).toThrow(
+      'Invalid PostgreSQL schema name: "bad schema"',
+    );
+    expect(() => new PostgresSchemaDbUtils("x; DROP SCHEMA public")).toThrow(
+      "Invalid PostgreSQL schema name",
+    );
+  });
+
+  it("rejects an invalid search_path in initRuntimePool", async () => {
+    const schemaDb = new PostgresSchemaDbUtils("good_schema");
+    await expect(
+      schemaDb.initRuntimePool(makeConfig(), "good_schema, bad schema"),
+    ).rejects.toThrow("Invalid PostgreSQL schema name");
+  });
+
+  it("accepts a comma-separated search_path including $user", async () => {
+    const schemaDb = new PostgresSchemaDbUtils("good_schema");
+    await schemaDb.initRuntimePool(makeConfig(), "$user, public, good_schema");
+    const runtimePool = mockCreatedPools[mockCreatedPools.length - 1];
+    expect(runtimePool.config.options).toBe(
+      "-c search_path=$user, public, good_schema",
+    );
+    await schemaDb.closeAll();
+  });
 });
 
 describe("PostgresAdvisoryLockKey", () => {
@@ -427,6 +486,9 @@ describe("PostgresDbUtils functional API", () => {
     setupFakeMetadataTable([99]);
     await PostgresDbUtilsInit(undefined as never, makeConfig(), "/sql");
     mockSpans.length = 0;
+    // Ignore the migration statements issued by init.
+    mockClientQuery.mockClear();
+    mockClientRelease.mockClear();
   });
 
   it("executes writes and returns the row count", async () => {
@@ -517,6 +579,67 @@ describe("PostgresDbUtils functional API", () => {
     );
     expect(statements).toEqual(["BEGIN", "COMMIT"]);
     expect(allSpansEnded()).toBe(true);
+  });
+
+  it("runs a callback transaction on a single client and releases it", async () => {
+    mockClientQuery.mockResolvedValue({ rows: [{ id: 7 }], rowCount: 1 });
+
+    const result = await PostgresDbUtilsTransaction(undefined, async (client) => {
+      const rows = await client.query("SELECT 7 AS id", []);
+      return rows.rows[0].id as number;
+    });
+
+    expect(result).toBe(7);
+    expect(executedSql()).toEqual(["BEGIN", "SELECT 7 AS id", "COMMIT"]);
+    expect(mockClientRelease).toHaveBeenCalledTimes(1);
+    expect(allSpansEnded()).toBe(true);
+  });
+
+  it("rolls back and rethrows when the transaction callback fails", async () => {
+    mockClientQuery.mockImplementation(async (sql: string) => {
+      if (String(sql) === "FAIL") {
+        throw new Error("constraint violation");
+      }
+      return { rows: [], rowCount: 0 };
+    });
+
+    await expect(
+      PostgresDbUtilsTransaction(undefined, async (client) => {
+        await client.query("FAIL", []);
+      }),
+    ).rejects.toThrow("constraint violation");
+
+    expect(executedSql()).toEqual(["BEGIN", "FAIL", "ROLLBACK"]);
+    expect(mockClientRelease).toHaveBeenCalledTimes(1);
+    const transactionSpan = mockSpans.find(
+      (span) => span.name === "PostgresDbUtilsTransaction",
+    );
+    expect(transactionSpan.setStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "constraint violation" }),
+    );
+    expect(allSpansEnded()).toBe(true);
+  });
+
+  it("adds db.* attributes to query spans", async () => {
+    functionalPool().query.mockResolvedValue({ rows: [], rowCount: 3 });
+
+    await PostgresDbUtilsExecSQL(undefined, "UPDATE t SET c = $1", ["x"]);
+    await PostgresDbUtilsQuerySQL(undefined, "SELECT * FROM t");
+
+    const execSpan = mockSpans.find(
+      (span) => span.name === "PostgresDbUtilsExecSQL",
+    );
+    expect(execSpan.setAttributes).toHaveBeenCalledWith({
+      "db.system": "postgresql",
+      "db.statement": "UPDATE t SET c = $1",
+    });
+    const querySpan = mockSpans.find(
+      (span) => span.name === "PostgresDbUtilsQuerySQL",
+    );
+    expect(querySpan.setAttributes).toHaveBeenCalledWith({
+      "db.system": "postgresql",
+      "db.statement": "SELECT * FROM t",
+    });
   });
 });
 

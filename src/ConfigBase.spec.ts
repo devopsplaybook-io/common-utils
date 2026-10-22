@@ -46,6 +46,11 @@ describe("ConfigBase", () => {
     delete process.env.AUTH_RATE_LIMIT_LOGIN_MAX;
     delete process.env.AUTH_RATE_LIMIT_REFRESH_MAX;
     delete process.env.AUTH_RATE_LIMIT_WINDOW_SECONDS;
+    delete process.env.PASSWORD_MIN_LENGTH;
+    delete process.env.API_TOKENS_REVOKE_ON_PASSWORD_CHANGE;
+    delete process.env.DATABASE_SQLITE_JOURNAL_MODE;
+    delete process.env.DATABASE_SQLITE_BUSY_TIMEOUT_MS;
+    delete process.env.DATABASE_SQLITE_FOREIGN_KEYS;
   });
 
   it("should initialise with default values", () => {
@@ -63,6 +68,23 @@ describe("ConfigBase", () => {
     expect(config.AUTH_RATE_LIMIT_LOGIN_MAX).toBe(10);
     expect(config.AUTH_RATE_LIMIT_REFRESH_MAX).toBe(60);
     expect(config.AUTH_RATE_LIMIT_WINDOW_SECONDS).toBe(60);
+    expect(config.PASSWORD_MIN_LENGTH).toBe(0);
+    expect(config.API_TOKENS_REVOKE_ON_PASSWORD_CHANGE).toBe(false);
+  });
+
+  it("should load the password policy and SQLite pragma settings", async () => {
+    process.env.PASSWORD_MIN_LENGTH = "12";
+    process.env.API_TOKENS_REVOKE_ON_PASSWORD_CHANGE = "true";
+    process.env.DATABASE_SQLITE_JOURNAL_MODE = "wal";
+    process.env.DATABASE_SQLITE_BUSY_TIMEOUT_MS = "2500";
+    process.env.DATABASE_SQLITE_FOREIGN_KEYS = "yes";
+    const config = new TestConfig(configPath);
+    await config.reload();
+    expect(config.PASSWORD_MIN_LENGTH).toBe(12);
+    expect(config.API_TOKENS_REVOKE_ON_PASSWORD_CHANGE).toBe(true);
+    expect(config.DATABASE_SQLITE_JOURNAL_MODE).toBe("wal");
+    expect(config.DATABASE_SQLITE_BUSY_TIMEOUT_MS).toBe(2500);
+    expect(config.DATABASE_SQLITE_FOREIGN_KEYS).toBe(true);
   });
 
   it("should load the rate-limit settings from the environment", async () => {

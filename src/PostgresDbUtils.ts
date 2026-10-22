@@ -48,6 +48,50 @@ export const POSTGRES_LOCK_KEYS: Record<string, number> = {
 };
 
 /**
+ * Schema and search_path segments are interpolated into SQL, so they must be
+ * plain unquoted identifiers. Rejecting anything else prevents an injection
+ * through a misconfigured schema name.
+ */
+const SCHEMA_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function assertValidSchemaName(name: string): void {
+  if (!SCHEMA_NAME_RE.test(name)) {
+    throw new Error(
+      `Invalid PostgreSQL schema name: "${name}" (expected an unquoted identifier)`,
+    );
+  }
+}
+
+/** Validate every comma-separated segment of a `search_path` setting. */
+function assertValidSearchPath(searchPath: string): void {
+  for (const rawSegment of searchPath.split(",")) {
+    const segment = rawSegment.trim();
+    // `$user` is a built-in search_path keyword, not an identifier.
+    if (segment === "$user" || segment === '"$user"') {
+      continue;
+    }
+    assertValidSchemaName(segment);
+  }
+}
+
+/** Cap applied to the `db.statement` span attribute (placeholders only). */
+const DB_STATEMENT_MAX_LENGTH = 4096;
+
+function truncateDbStatement(sql: string): string {
+  return sql.length <= DB_STATEMENT_MAX_LENGTH
+    ? sql
+    : sql.slice(0, DB_STATEMENT_MAX_LENGTH);
+}
+
+/** Add the standard `db.*` attributes to a Postgres span. */
+function setDbSpanAttributes(span: { setAttributes: (a: any) => void }, sql: string): void {
+  span.setAttributes({
+    "db.system": "postgresql",
+    "db.statement": truncateDbStatement(sql),
+  });
+}
+
+/**
  * 32-bit FNV-1a hash, stable across processes, replicas and restarts.
  * Returns an unsigned 32-bit integer.
  */
@@ -74,10 +118,20 @@ export function PostgresAdvisoryLockKey(lock: PostgresLockName): number {
 // Module-level state
 // ---------------------------------------------------------------------------
 
-let pool: Pool;
+let pool: Pool | undefined;
 let tracer: StandardTracer;
 let logger: ModuleLogger;
 let standardLogger: StandardLogger;
+
+/** @throws when called before {@link PostgresDbUtilsInit}. */
+function requirePool(): Pool {
+  if (!pool) {
+    throw new Error(
+      "Postgres pool not initialized; call PostgresDbUtilsInit first",
+    );
+  }
+  return pool;
+}
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -154,8 +208,10 @@ async function queryOnClient(
   params: unknown[] = [],
 ): Promise<any[]> {
   const span = tracer.startSpan(spanName, context);
+  setDbSpanAttributes(span, sql);
   try {
     const result = await client.query(sql, params);
+    span.setAttributes({ "db.rows_returned": result.rows.length });
     return result.rows;
   } catch (error) {
     span.setStatus({
@@ -184,6 +240,8 @@ async function applyMigrationOnClient(
   const span = tracer.startSpan("PostgresDbUtilsExecSQLFile", context);
   try {
     const sql = (await fs.readFile(filename)).toString();
+    setDbSpanAttributes(span, sql);
+    span.setAttributes({ "db.sql.file": filename });
     await client.query("BEGIN");
     try {
       await client.query(sql);
@@ -251,6 +309,7 @@ export class PostgresSchemaDbUtils {
   private _moduleLogger: ModuleLogger | null = null;
 
   constructor(schemaName: string) {
+    assertValidSchemaName(schemaName);
     this.schemaName = schemaName;
   }
 
@@ -327,7 +386,7 @@ export class PostgresSchemaDbUtils {
 
             const initFiles = (await fs.readdir(sqlDir)).sort();
             for (const initFile of initFiles) {
-              const match = /init-(\d+)\.sql/.exec(initFile);
+              const match = /^init-(\d+)\.sql$/.exec(initFile);
               if (match) {
                 const dbVersionInitFile = Number(match[1]);
                 if (dbVersionInitFile > dbVersionApplied) {
@@ -365,9 +424,11 @@ export class PostgresSchemaDbUtils {
     config: PostgresDbConfig,
     searchPath?: string,
   ): Promise<void> {
+    const effectiveSearchPath = searchPath || this.schemaName;
+    assertValidSearchPath(effectiveSearchPath);
     const previousPool = this.runtimePool;
     this.runtimePool = new Pool(
-      buildPoolConfig(config, searchPath || this.schemaName, 20, true),
+      buildPoolConfig(config, effectiveSearchPath, 20, true),
     );
     if (previousPool) {
       await previousPool.end().catch(() => {
@@ -375,7 +436,7 @@ export class PostgresSchemaDbUtils {
       });
     }
     this.moduleLogger.info(
-      `Runtime pool initialized (search_path: ${searchPath || this.schemaName})`,
+      `Runtime pool initialized (search_path: ${effectiveSearchPath})`,
     );
   }
 
@@ -400,7 +461,9 @@ export class PostgresSchemaDbUtils {
           `Pool not initialized${useSchemaPool ? ` for schema: ${this.schemaName}` : ""}`,
         );
       }
+      setDbSpanAttributes(span, sql);
       const result = await targetPool.query(sql, params);
+      span.setAttributes({ "db.rows_affected": result.rowCount || 0 });
       return result.rowCount || 0;
     } catch (error) {
       span.setStatus({
@@ -438,6 +501,8 @@ export class PostgresSchemaDbUtils {
         );
       }
       const sql = (await fs.readFile(filename)).toString();
+      setDbSpanAttributes(span, sql);
+      span.setAttributes({ "db.sql.file": filename });
       await targetPool.query(sql);
     } catch (error) {
       span.setStatus({
@@ -469,7 +534,9 @@ export class PostgresSchemaDbUtils {
           `Pool not initialized${useSchemaPool ? ` for schema: ${this.schemaName}` : ""}`,
         );
       }
+      setDbSpanAttributes(span, sql);
       const result = await targetPool.query(sql, params);
+      span.setAttributes({ "db.rows_returned": result.rows.length });
       return result.rows;
     } catch (error) {
       span.setStatus({
@@ -505,16 +572,10 @@ export class PostgresSchemaDbUtils {
           `Pool not initialized${useSchemaPool ? ` for schema: ${this.schemaName}` : ""}`,
         );
       }
-      this.moduleLogger.info(
-        `[${useSchemaPool ? this.schemaName : "RUNTIME"}] Starting transaction`,
-      );
       client = await pool.connect();
       await client.query("BEGIN");
       await callback(client);
       await client.query("COMMIT");
-      this.moduleLogger.info(
-        `[${useSchemaPool ? this.schemaName : "RUNTIME"}] Transaction committed`,
-      );
     } catch (error) {
       if (client) {
         await client.query("ROLLBACK").catch(() => {
@@ -588,6 +649,9 @@ export function PostgresDbUtilsSetOTel(
  * booting replicas serialise instead of double-applying) and each file plus
  * its `db_version` row runs in its own transaction: a failing migration is
  * rolled back and never recorded.
+ *
+ * Intended to be called once at startup. Calling it again replaces the pool
+ * and closes the previous one, so no connections are leaked.
  */
 export async function PostgresDbUtilsInit(
   context: Span,
@@ -596,13 +660,21 @@ export async function PostgresDbUtilsInit(
 ): Promise<void> {
   const span = tracer.startSpan("PostgresDbUtilsInit", context);
   try {
-    pool = new Pool(buildPoolConfig(config, undefined, 20, true));
+    const previousPool = pool;
+    pool = undefined;
+    if (previousPool) {
+      await previousPool.end().catch(() => {
+        // Ignore errors on close
+      });
+    }
+    const newPool = new Pool(buildPoolConfig(config, undefined, 20, true));
+    pool = newPool;
 
-    pool.on("error", (err: Error) => {
+    newPool.on("error", (err: Error) => {
       logger.error("PostgreSQL pool connection error", err);
     });
 
-    const client = await pool.connect();
+    const client = await newPool.connect();
     try {
       await withAdvisoryLockOnClient(
         client,
@@ -622,7 +694,7 @@ export async function PostgresDbUtilsInit(
           logger.info(`Current DB Version: ${dbVersionApplied}`, span);
           const initFiles = (await fs.readdir(sqlDir)).sort();
           for (const initFile of initFiles) {
-            const match = /init-(\d+)\.sql/.exec(initFile);
+            const match = /^init-(\d+)\.sql$/.exec(initFile);
             if (match) {
               const dbVersionInitFile = Number(match[1]);
               if (dbVersionInitFile > dbVersionApplied) {
@@ -659,7 +731,7 @@ export async function PostgresDbUtilsWithAdvisoryLock<T>(
   callback: () => Promise<T>,
   context?: Span,
 ): Promise<T> {
-  const client = await pool.connect();
+  const client = await requirePool().connect();
   try {
     return await withAdvisoryLockOnClient(
       client,
@@ -672,9 +744,9 @@ export async function PostgresDbUtilsWithAdvisoryLock<T>(
   }
 }
 
-/** Returns the underlying `pg.Pool` instance. */
+/** Returns the underlying `pg.Pool` instance (undefined before init). */
 export function PostgresDbUtilsGetPool(): Pool {
-  return pool;
+  return pool as Pool;
 }
 
 /**
@@ -688,7 +760,9 @@ export async function PostgresDbUtilsExecSQL(
 ): Promise<number> {
   const span = tracer.startSpan("PostgresDbUtilsExecSQL", context);
   try {
-    const result = await pool.query(sql, params);
+    setDbSpanAttributes(span, sql);
+    const result = await requirePool().query(sql, params);
+    span.setAttributes({ "db.rows_affected": result.rowCount || 0 });
     span.addEvent(`Impacted Rows: ${result.rowCount || 0}`);
     return result.rowCount || 0;
   } catch (error) {
@@ -713,7 +787,9 @@ export async function PostgresDbUtilsExecSQLFile(
   const span = tracer.startSpan("PostgresDbUtilsExecSQLFile", context);
   try {
     const sql = (await fs.readFile(filename)).toString();
-    await pool.query(sql);
+    setDbSpanAttributes(span, sql);
+    span.setAttributes({ "db.sql.file": filename });
+    await requirePool().query(sql);
   } catch (error) {
     span.setStatus({
       code: SpanStatusCode.ERROR,
@@ -736,11 +812,13 @@ export async function PostgresDbUtilsQuerySQL(
   debug = false,
 ): Promise<any[]> {
   const span = tracer.startSpan("PostgresDbUtilsQuerySQL", context);
+  setDbSpanAttributes(span, sql);
   if (debug) {
     console.log(sql);
   }
   try {
-    const result = await pool.query(sql, params);
+    const result = await requirePool().query(sql, params);
+    span.setAttributes({ "db.rows_returned": result.rows.length });
     return result.rows;
   } catch (error) {
     span.setStatus({
@@ -754,13 +832,60 @@ export async function PostgresDbUtilsQuerySQL(
   }
 }
 
-/** Start a transaction. */
+/**
+ * Run a callback inside a transaction on a single pooled connection.
+ *
+ * `BEGIN`, the callback and `COMMIT` all run on the same client; on error the
+ * transaction is rolled back and the client is always released. This is the
+ * safe replacement for {@link PostgresDbUtilsTransactionStart} /
+ * {@link PostgresDbUtilsTransactionCommit}, which issued `BEGIN` and `COMMIT`
+ * through the pool and could therefore land on different connections.
+ */
+export async function PostgresDbUtilsTransaction<T>(
+  context: Span | undefined,
+  callback: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const span = tracer.startSpan("PostgresDbUtilsTransaction", context);
+  let client: PoolClient | null = null;
+  let committed = false;
+  try {
+    client = await requirePool().connect();
+    await client.query("BEGIN");
+    const result = await callback(client);
+    await client.query("COMMIT");
+    committed = true;
+    return result;
+  } catch (error) {
+    if (client && !committed) {
+      await client.query("ROLLBACK").catch(() => {
+        // Connection failure: nothing to roll back.
+      });
+    }
+    span.setStatus({
+      code: SpanStatusCode.ERROR,
+      message: (error as Error).message,
+    });
+    throw error;
+  } finally {
+    client?.release();
+    span.end();
+  }
+}
+
+/**
+ * Start a transaction.
+ *
+ * @deprecated `BEGIN` runs on a pooled connection that `COMMIT` may not
+ * reuse, so the statements can execute in different sessions. Use
+ * {@link PostgresDbUtilsTransaction}, which pins one client for the whole
+ * transaction.
+ */
 export async function PostgresDbUtilsTransactionStart(
   context: Span | undefined,
 ): Promise<void> {
   const span = tracer.startSpan("PostgresDbUtilsTransactionStart", context);
   try {
-    await pool.query("BEGIN");
+    await requirePool().query("BEGIN");
   } catch (error) {
     span.setStatus({
       code: SpanStatusCode.ERROR,
@@ -772,13 +897,17 @@ export async function PostgresDbUtilsTransactionStart(
   }
 }
 
-/** Commit a transaction. */
+/**
+ * Commit a transaction.
+ *
+ * @deprecated See {@link PostgresDbUtilsTransactionStart}.
+ */
 export async function PostgresDbUtilsTransactionCommit(
   context: Span | undefined,
 ): Promise<void> {
   const span = tracer.startSpan("PostgresDbUtilsTransactionCommit", context);
   try {
-    await pool.query("COMMIT");
+    await requirePool().query("COMMIT");
   } catch (error) {
     span.setStatus({
       code: SpanStatusCode.ERROR,

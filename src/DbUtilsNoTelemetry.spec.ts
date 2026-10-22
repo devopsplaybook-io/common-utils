@@ -127,6 +127,117 @@ describe("DbUtilsNoTelemetryBatchInsert", () => {
   });
 });
 
+describe("DbUtilsNoTelemetryBatchInsert atomicity", () => {
+  afterEach(() => {
+    delete (mockDbHandle as any).transaction;
+    delete (mockDbHandle as any).connect;
+  });
+
+  const largeRows = (count = 7000) =>
+    Array.from({ length: count }, (_, rowIndex) =>
+      Array.from({ length: 9 }, (_, colIndex) => `${rowIndex}-${colIndex}`),
+    );
+
+  it("wraps SQLite chunked batches in one transaction", () => {
+    currentDbType = "sqlite";
+    const run = jest.fn(() => ({ changes: 1 }));
+    mockPrepare.mockImplementation(() => ({ run, all: jest.fn() }) as any);
+    const transaction = jest.fn((fn: () => number) => () => fn());
+    (mockDbHandle as any).transaction = transaction;
+
+    const result = DbUtilsNoTelemetryBatchInsert(
+      "INTO sqlite_tx_test (c1,c2,c3,c4,c5,c6,c7,c8,c9)",
+      9,
+      largeRows(),
+    );
+
+    expect(result).toBe(2);
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it("propagates a failing SQLite chunk out of the transaction", () => {
+    currentDbType = "sqlite";
+    const run = jest
+      .fn()
+      .mockReturnValueOnce({ changes: 3640 })
+      .mockImplementationOnce(() => {
+        throw new Error("disk full");
+      });
+    mockPrepare.mockImplementation(() => ({ run, all: jest.fn() }) as any);
+    const transaction = jest.fn((fn: () => number) => () => fn());
+    (mockDbHandle as any).transaction = transaction;
+
+    expect(() =>
+      DbUtilsNoTelemetryBatchInsert(
+        "INTO sqlite_tx_fail (c1,c2,c3,c4,c5,c6,c7,c8,c9)",
+        9,
+        largeRows(),
+      ),
+    ).toThrow("disk full");
+    expect(transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs Postgres chunked batches on one client inside BEGIN/COMMIT", async () => {
+    currentDbType = "postgres";
+    const clientQuery = jest.fn(
+      async (sql: string, params?: unknown[]) =>
+        sql === "BEGIN" || sql === "COMMIT"
+          ? { rowCount: null, rows: [] }
+          : { rowCount: (params as unknown[]).length / 9, rows: [] },
+    );
+    const release = jest.fn();
+    const connect = jest
+      .fn()
+      .mockResolvedValue({ query: clientQuery, release });
+    (mockDbHandle as any).connect = connect;
+
+    const rows = Array.from({ length: 8000 }, (_, rowIndex) =>
+      Array.from({ length: 9 }, (_, colIndex) => `${rowIndex}-${colIndex}`),
+    );
+    const result = await DbUtilsNoTelemetryBatchInsert(
+      "INTO pg_tx_test (c1,c2,c3,c4,c5,c6,c7,c8,c9)",
+      9,
+      rows,
+    );
+
+    expect(result).toBe(8000);
+    expect(connect).toHaveBeenCalledTimes(1);
+    const statements = clientQuery.mock.calls.map((call) => String(call[0]));
+    expect(statements[0]).toBe("BEGIN");
+    expect(statements[statements.length - 1]).toBe("COMMIT");
+    expect(statements.filter((sql) => sql === "COMMIT")).toHaveLength(1);
+    expect(mockQuery).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("rolls back and releases the Postgres client when a chunk fails", async () => {
+    currentDbType = "postgres";
+    const clientQuery = jest.fn(async (sql: string) => {
+      if (sql === "BEGIN") return { rowCount: null, rows: [] };
+      throw new Error("deadlock detected");
+    });
+    const release = jest.fn();
+    const connect = jest
+      .fn()
+      .mockResolvedValue({ query: clientQuery, release });
+    (mockDbHandle as any).connect = connect;
+
+    await expect(
+      DbUtilsNoTelemetryBatchInsert(
+        "INTO pg_tx_fail (c1,c2,c3,c4,c5,c6,c7,c8,c9)",
+        9,
+        largeRows(8000),
+      ),
+    ).rejects.toThrow("deadlock detected");
+
+    const statements = clientQuery.mock.calls.map((call) => String(call[0]));
+    expect(statements).toContain("ROLLBACK");
+    expect(statements).not.toContain("COMMIT");
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("DbUtilsNoTelemetryExecSQL (sqlite)", () => {
   beforeEach(() => {
     currentDbType = "sqlite";

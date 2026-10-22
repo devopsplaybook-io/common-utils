@@ -188,7 +188,15 @@ const changes = SqlDbUtilsExecSQL(
 | `SqlDbUtilsExecSQLFile` | `(span, filename)`             | Execute an entire SQL file                       |
 | `SqlDbUtilsGetDatabase` | `()`                           | Returns the `better-sqlite3` `Database` instance |
 
-**Migration convention**: Files named `init-NNNN.sql` in `sqlDir`, applied in order. `init-0000.sql` must exist (it creates the `metadata` table) — a missing file rejects the init. Each migration file and its `db_version` row are applied inside a single transaction: a failing migration is rolled back, its version is **not** recorded, and it is retried on the next boot. Applied versions are compared numerically — `metadata.value` is a text-affinity column, so a plain `MAX(value)` would order `"9"` after `"10"` and re-apply the tenth and later migrations forever. SQLite has a single writer: never point two processes at the same database file while init/migrations run (Postgres is protected by an advisory lock instead).
+**Migration convention**: Files named `init-NNNN.sql` in `sqlDir`, applied in order. The name must match exactly (`^init-NNNN.sql$`): a file such as `backup-init-0005.sql` or `init-0005.sql.bak` is ignored. `init-0000.sql` must exist (it creates the `metadata` table) — a missing file rejects the init. Each migration file and its `db_version` row are applied inside a single transaction: a failing migration is rolled back, its version is **not** recorded, and it is retried on the next boot. Applied versions are compared numerically — `metadata.value` is a text-affinity column, so a plain `MAX(value)` would order `"9"` after `"10"` and re-apply the tenth and later migrations forever. SQLite has a single writer: never point two processes at the same database file while init/migrations run (Postgres is protected by an advisory lock instead).
+
+Optional SQLite pragmas are applied when the database is opened:
+
+| Config field                     | Effect                                                                 |
+| -------------------------------- | ---------------------------------------------------------------------- |
+| `DATABASE_SQLITE_JOURNAL_MODE`   | `delete` (default), `truncate`, `persist`, `memory`, `wal` or `off`    |
+| `DATABASE_SQLITE_BUSY_TIMEOUT_MS`| How long a write waits for a lock before failing (`0` = driver default)|
+| `DATABASE_SQLITE_FOREIGN_KEYS`   | Enable `PRAGMA foreign_keys` (default on, matching better-sqlite3)     |
 
 ---
 
@@ -204,8 +212,9 @@ Async (Promise-based) database operations using `pg.Pool`, with OTel tracing.
 | `PostgresDbUtilsQuerySQL`          | `(span, sql, params?, debug?)` | Execute read, returns `Promise<any[]>`   |
 | `PostgresDbUtilsExecSQLFile`       | `(span, filename)`             | Execute an entire SQL file               |
 | `PostgresDbUtilsGetPool`           | `()`                           | Returns the `pg.Pool` instance           |
-| `PostgresDbUtilsTransactionStart`  | `(span)`                       | Begin a transaction (`BEGIN`)            |
-| `PostgresDbUtilsTransactionCommit` | `(span)`                       | Commit a transaction (`COMMIT`)          |
+| `PostgresDbUtilsTransaction`       | `(span, callback)`             | Run a callback on one client inside `BEGIN`/`COMMIT`, rolling back on error |
+| `PostgresDbUtilsTransactionStart`  | `(span)`                       | **Deprecated** — `BEGIN` on a pooled connection; use `PostgresDbUtilsTransaction` |
+| `PostgresDbUtilsTransactionCommit` | `(span)`                       | **Deprecated** — may commit a different session; use `PostgresDbUtilsTransaction` |
 
 Pool defaults: `max: 20`, `idleTimeoutMillis: 30000`, `connectionTimeoutMillis: 10000`. `DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS` and `DATABASE_POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS` set the matching per-session settings on every pool (`0`, the default, keeps them disabled — the historical behaviour). Migrations run inside a transaction and are serialised across replicas with a Postgres advisory lock, so two pods booting at the same time cannot apply the same `init-NNNN.sql` twice. The same migration conventions as SQLite apply (`init-0000.sql` must exist, versions are compared numerically).
 
@@ -332,7 +341,7 @@ DbUtilsNoTelemetryBatchInsert(
 | `DbUtilsNoTelemetryQuerySQL(sql, params?, debug?)`        | Read without spans                |
 | `DbUtilsNoTelemetryBatchInsert(tableCols, numCols, rows)` | Optimized multi-row INSERT        |
 
-Repeated statements are compiled once per connection: prepared statements are cached per SQL string (bounded cache, cleared on re-init), which removes the per-call `prepare` cost on ingestion hot paths. `DbUtilsNoTelemetryBatchInsert` chunks large row sets automatically so the generated statement stays below the driver parameter limit (65535 parameters for Postgres, 32766 for SQLite) instead of failing with an opaque driver error.
+Repeated statements are compiled once per connection: prepared statements are cached per SQL string (bounded cache, cleared on re-init), which removes the per-call `prepare` cost on ingestion hot paths. `DbUtilsNoTelemetryBatchInsert` chunks large row sets automatically so the generated statement stays below the driver parameter limit (65535 parameters for Postgres, 32766 for SQLite) instead of failing with an opaque driver error. A chunked batch is atomic: SQLite runs all chunks in one `better-sqlite3` transaction and Postgres runs them on one pooled client inside `BEGIN`/`COMMIT`, so a failure mid-batch inserts **none** of the rows. `?`-to-`$N` conversion results are cached in a bounded LRU on the Postgres path.
 
 ---
 

@@ -79,7 +79,8 @@ describe("Packaging", () => {
         (pkg.exports[subpath].default as string).startsWith("./dist/"),
       ).toBe(true);
     }
-    expect(pkg.engines.node).toBe(">=22");
+    // uuid v14 is ESM-only and requires Node >= 22.12.
+    expect(pkg.engines.node).toBe(">=22.12");
   });
 
   it("resolves every export target to a compiled source file", () => {

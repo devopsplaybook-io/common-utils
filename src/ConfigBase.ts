@@ -40,6 +40,12 @@ export interface ConfigDatabaseInterface {
   DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS: number;
   /** Per-session `idle_in_transaction_session_timeout` in ms (0 = disabled). */
   DATABASE_POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS: number;
+  /** SQLite journal mode (`wal` recommended for concurrent readers). */
+  DATABASE_SQLITE_JOURNAL_MODE?: string;
+  /** SQLite `busy_timeout` in ms (0 = driver default). */
+  DATABASE_SQLITE_BUSY_TIMEOUT_MS?: number;
+  /** Enable SQLite `PRAGMA foreign_keys` (default on, like better-sqlite3). */
+  DATABASE_SQLITE_FOREIGN_KEYS?: boolean;
 }
 
 /**
@@ -58,6 +64,10 @@ export interface ConfigCommonInterface
   AUTH_RATE_LIMIT_REFRESH_MAX: number;
   /** Rate-limit window in seconds. */
   AUTH_RATE_LIMIT_WINDOW_SECONDS: number;
+  /** Minimum password length (`0` = only non-empty passwords). */
+  PASSWORD_MIN_LENGTH: number;
+  /** Revoke every API token when a user changes their password. */
+  API_TOKENS_REVOKE_ON_PASSWORD_CHANGE: boolean;
   CORS_POLICY_ORIGIN: string;
   DATA_DIR: string;
   JWT_KEY: string;
@@ -170,6 +180,10 @@ export abstract class ConfigBase implements ConfigCommonInterface {
   public AUTH_RATE_LIMIT_REFRESH_MAX = 60;
   /** Rate-limit window in seconds. */
   public AUTH_RATE_LIMIT_WINDOW_SECONDS = 60;
+  /** Minimum password length enforced by the auth module. */
+  public PASSWORD_MIN_LENGTH = 0;
+  /** Revoke every API token when a user changes their password. */
+  public API_TOKENS_REVOKE_ON_PASSWORD_CHANGE = false;
   public CORS_POLICY_ORIGIN = "";
   public DATA_DIR = process.env.DATA_DIR || "/data";
   /**
@@ -198,6 +212,19 @@ export abstract class ConfigBase implements ConfigCommonInterface {
    * Postgres pool. `0` (default) disables the timeout.
    */
   public DATABASE_POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS = 0;
+  /**
+   * SQLite journal mode applied at open. Empty keeps the SQLite default
+   * (`delete`); `wal` is recommended when a separate reader may access the
+   * database while the service writes.
+   */
+  public DATABASE_SQLITE_JOURNAL_MODE = "";
+  /**
+   * SQLite `busy_timeout` in ms applied at open. `0` keeps the driver
+   * default (better-sqlite3: 5000 ms).
+   */
+  public DATABASE_SQLITE_BUSY_TIMEOUT_MS = 0;
+  /** Enable SQLite `PRAGMA foreign_keys` (default on, like better-sqlite3). */
+  public DATABASE_SQLITE_FOREIGN_KEYS = true;
 
   /**
    * Fields registered by subclasses (or the base) that {@link reload}
@@ -230,6 +257,8 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       { field: "AUTH_RATE_LIMIT_LOGIN_MAX" },
       { field: "AUTH_RATE_LIMIT_REFRESH_MAX" },
       { field: "AUTH_RATE_LIMIT_WINDOW_SECONDS" },
+      { field: "PASSWORD_MIN_LENGTH" },
+      { field: "API_TOKENS_REVOKE_ON_PASSWORD_CHANGE" },
       { field: "CORS_POLICY_ORIGIN" },
       { field: "DATA_DIR" },
       { field: "JWT_KEY", sensitive: true },
@@ -246,6 +275,9 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       { field: "DATABASE_POSTGRES_DATABASE", envAliases: ["POSTGRES_DB"] },
       { field: "DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS" },
       { field: "DATABASE_POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS" },
+      { field: "DATABASE_SQLITE_JOURNAL_MODE" },
+      { field: "DATABASE_SQLITE_BUSY_TIMEOUT_MS" },
+      { field: "DATABASE_SQLITE_FOREIGN_KEYS" },
       { field: "OPENTELEMETRY_COLLECTOR_HTTP_TRACES" },
       { field: "OPENTELEMETRY_COLLECTOR_HTTP_METRICS" },
       { field: "OPENTELEMETRY_COLLECTOR_HTTP_LOGS" },
