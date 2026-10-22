@@ -43,6 +43,9 @@ describe("ConfigBase", () => {
     delete process.env.DATABASE_POSTGRES_PORT;
     delete process.env.DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS;
     delete process.env.OPENTELEMETRY_COLLECTOR_AWS;
+    delete process.env.AUTH_RATE_LIMIT_LOGIN_MAX;
+    delete process.env.AUTH_RATE_LIMIT_REFRESH_MAX;
+    delete process.env.AUTH_RATE_LIMIT_WINDOW_SECONDS;
   });
 
   it("should initialise with default values", () => {
@@ -52,6 +55,25 @@ describe("ConfigBase", () => {
     expect(config.SECRET_KEY).toBe("secret_default");
     expect(config.LOG_LEVEL).toBe("info");
     expect(config.DATABASE_TYPE).toBe("sqlite");
+  });
+
+  it("should default JWT_KEY to empty (DB-managed) and rate limits to 10/60/60", () => {
+    const config = new TestConfig(configPath);
+    expect(config.JWT_KEY).toBe("");
+    expect(config.AUTH_RATE_LIMIT_LOGIN_MAX).toBe(10);
+    expect(config.AUTH_RATE_LIMIT_REFRESH_MAX).toBe(60);
+    expect(config.AUTH_RATE_LIMIT_WINDOW_SECONDS).toBe(60);
+  });
+
+  it("should load the rate-limit settings from the environment", async () => {
+    process.env.AUTH_RATE_LIMIT_LOGIN_MAX = "5";
+    process.env.AUTH_RATE_LIMIT_REFRESH_MAX = "30";
+    process.env.AUTH_RATE_LIMIT_WINDOW_SECONDS = "120";
+    const config = new TestConfig(configPath);
+    await config.reload();
+    expect(config.AUTH_RATE_LIMIT_LOGIN_MAX).toBe(5);
+    expect(config.AUTH_RATE_LIMIT_REFRESH_MAX).toBe(30);
+    expect(config.AUTH_RATE_LIMIT_WINDOW_SECONDS).toBe(120);
   });
 
   it("should load values from config.json", async () => {

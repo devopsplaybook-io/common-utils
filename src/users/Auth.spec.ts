@@ -27,7 +27,13 @@ import { StandardTracer } from "@devopsplaybook.io/otel-utils";
 import * as jwt from "jsonwebtoken";
 import { DbUtilsExecSQL, DbUtilsQuerySQL, DbUtilsWithLock } from "../DbUtils";
 import {
+  AUTH_ERROR_CODE_FORBIDDEN,
+  AUTH_ERROR_CODE_UNAUTHENTICATED,
   AuthGenerateJWT,
+  AuthGetLiveUser,
+  AuthGetRateLimitLoginMax,
+  AuthGetRateLimitRefreshMax,
+  AuthGetRateLimitWindowSeconds,
   AuthGetUserSession,
   AuthHasScope,
   AuthInit,
@@ -53,6 +59,8 @@ const mockedWithLock = DbUtilsWithLock as jest.Mock;
 const mockTracer = {
   startSpan: () => ({ end: () => undefined }),
 } as unknown as StandardTracer;
+
+const APP_SCOPES = ["traces", "metrics", "logs"];
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
   return {
@@ -94,30 +102,52 @@ function makeToken(overrides: Partial<UserApiToken> = {}): UserApiToken {
   return Object.assign(apiToken, overrides);
 }
 
-async function expectAccessDenied(
+async function expectUnauthenticated(
+  guard: Promise<void>,
+  res: ReturnType<typeof mockRes>,
+) {
+  await expect(guard).rejects.toThrow();
+  expect(res.status).toHaveBeenCalledWith(401);
+  expect(res.send).toHaveBeenCalledWith({
+    error: "Authentication Required",
+    code: AUTH_ERROR_CODE_UNAUTHENTICATED,
+  });
+}
+
+async function expectForbidden(
   guard: Promise<void>,
   res: ReturnType<typeof mockRes>,
 ) {
   await expect(guard).rejects.toThrow("Access Denied");
   expect(res.status).toHaveBeenCalledWith(403);
-  expect(res.send).toHaveBeenCalledWith({ error: "Access Denied" });
+  expect(res.send).toHaveBeenCalledWith({
+    error: "Access Denied",
+    code: AUTH_ERROR_CODE_FORBIDDEN,
+  });
 }
 
-beforeAll(async () => {
+beforeAll(() => {
   AuthSetOTel(mockTracer);
-  mockedQuery.mockResolvedValue([]);
-  await AuthInit(null as never, makeConfig(), ["traces", "metrics", "logs"]);
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   mockedGetByHash.mockReset();
   mockedSetLastUsed.mockReset();
   mockedUsersDataGet.mockReset();
+  mockedExec.mockReset();
+  mockedQuery.mockReset();
+  mockedQuery.mockResolvedValue([]);
+  await AuthInit(undefined as never, makeConfig(), APP_SCOPES);
+  // Ignore the setup init when tests assert on database access.
+  mockedQuery.mockClear();
+  mockedExec.mockClear();
+  mockedWithLock.mockClear();
 });
 
 describe("JWT authentication", () => {
   it("should authenticate a valid JWT signed with HS256", async () => {
     const user = makeUser({ role: "user", scopes: ["traces"] });
+    mockedUsersDataGet.mockResolvedValue(user);
     const jwtToken = await AuthGenerateJWT(user);
 
     const header = jwt.decode(jwtToken, { complete: true }) as {
@@ -133,12 +163,12 @@ describe("JWT authentication", () => {
 
   it("should reject a request without authorization header", async () => {
     const res = mockRes();
-    await expectAccessDenied(AuthMustBeAuthenticated(mockReq(), res), res);
+    await expectUnauthenticated(AuthMustBeAuthenticated(mockReq(), res), res);
   });
 
   it("should reject an invalid JWT", async () => {
     const res = mockRes();
-    await expectAccessDenied(
+    await expectUnauthenticated(
       AuthMustBeAuthenticated(mockReq("Bearer not-a-jwt"), res),
       res,
     );
@@ -155,7 +185,7 @@ describe("JWT authentication", () => {
     })}.`;
 
     const res = mockRes();
-    await expectAccessDenied(
+    await expectUnauthenticated(
       AuthMustBeAuthenticated(mockReq(`Bearer ${unsigned}`), res),
       res,
     );
@@ -169,7 +199,7 @@ describe("JWT authentication", () => {
     );
 
     const res = mockRes();
-    await expectAccessDenied(
+    await expectUnauthenticated(
       AuthMustBeAuthenticated(mockReq(`Bearer ${foreign}`), res),
       res,
     );
@@ -215,7 +245,7 @@ describe("API token authentication", () => {
     mockedUsersDataGet.mockResolvedValue(makeUser({ id: "user-1" }));
 
     const res = mockRes();
-    await expectAccessDenied(
+    await expectForbidden(
       AuthMustBeAdmin(mockReq("Bearer user-api-token"), res),
       res,
     );
@@ -239,7 +269,7 @@ describe("API token authentication", () => {
     );
 
     const res = mockRes();
-    await expectAccessDenied(
+    await expectForbidden(
       AuthHasScope(mockReq("Bearer unscoped-api-token"), res, "metrics"),
       res,
     );
@@ -254,7 +284,7 @@ describe("API token authentication", () => {
     );
 
     const res = mockRes();
-    await expectAccessDenied(
+    await expectUnauthenticated(
       AuthMustBeAuthenticated(mockReq("Bearer expired-api-token"), res),
       res,
     );
@@ -279,7 +309,7 @@ describe("API token authentication", () => {
     mockedGetByHash.mockResolvedValue(null);
 
     const res = mockRes();
-    await expectAccessDenied(
+    await expectUnauthenticated(
       AuthMustBeAuthenticated(mockReq("Bearer revoked-token"), res),
       res,
     );
@@ -290,12 +320,12 @@ describe("API token authentication", () => {
     mockedGetByHash.mockResolvedValue(null);
 
     const res1 = mockRes();
-    await expectAccessDenied(
+    await expectUnauthenticated(
       AuthMustBeAuthenticated(mockReq("Bearer negative-cached-token"), res1),
       res1,
     );
     const res2 = mockRes();
-    await expectAccessDenied(
+    await expectUnauthenticated(
       AuthMustBeAuthenticated(mockReq("Bearer negative-cached-token"), res2),
       res2,
     );
@@ -308,7 +338,7 @@ describe("API token authentication", () => {
     mockedUsersDataGet.mockResolvedValue(null);
 
     const res = mockRes();
-    await expectAccessDenied(
+    await expectUnauthenticated(
       AuthMustBeAuthenticated(mockReq("Bearer orphan-token"), res),
       res,
     );
@@ -343,13 +373,11 @@ describe("API token authentication", () => {
   });
 });
 
-describe("AuthInit", () => {
-  it("should load the existing JWT key from metadata", async () => {
-    mockedExec.mockReset();
-    mockedQuery.mockReset();
-    const config = makeConfig();
+describe("AuthInit JWT key precedence", () => {
+  it("should load the existing JWT key from metadata when no key is configured", async () => {
     mockedQuery.mockResolvedValue([{ value: "stored-key" }]);
-    await AuthInit(null as never, config, ["traces"]);
+    const config = makeConfig();
+    await AuthInit(undefined as never, config, ["traces"]);
 
     expect(config.JWT_KEY).toBe("stored-key");
     expect(mockedExec).not.toHaveBeenCalled();
@@ -361,14 +389,140 @@ describe("AuthInit", () => {
   });
 
   it("should generate and persist a JWT key when none is stored", async () => {
-    mockedExec.mockReset();
-    mockedQuery.mockReset();
     mockedQuery.mockResolvedValue([]);
     const config = makeConfig();
-    await AuthInit(null as never, config, ["traces"]);
+    await AuthInit(undefined as never, config, ["traces"]);
 
     expect(config.JWT_KEY).toBe("mock-uuid-1234");
     expect(mockedExec).toHaveBeenCalledTimes(1);
+  });
+
+  it("should honor an explicitly configured key and never touch the database", async () => {
+    mockedWithLock.mockClear();
+    const config = makeConfig({ JWT_KEY: "operator-configured-key" });
+    await AuthInit(undefined as never, config, ["traces"]);
+
+    expect(config.JWT_KEY).toBe("operator-configured-key");
+    expect(mockedQuery).not.toHaveBeenCalled();
+    expect(mockedExec).not.toHaveBeenCalled();
+    expect(mockedWithLock).not.toHaveBeenCalled();
+  });
+});
+
+describe("Live authorization", () => {
+  it("should reject an admin JWT whose live role is user", async () => {
+    const claimedAdmin = makeUser({ role: "admin" });
+    const jwtToken = await AuthGenerateJWT(claimedAdmin);
+    mockedUsersDataGet.mockResolvedValue(makeUser({ role: "user" }));
+
+    const res = mockRes();
+    await expectForbidden(
+      AuthMustBeAdmin(mockReq(`Bearer ${jwtToken}`), res),
+      res,
+    );
+  });
+
+  it("should answer 401 when an admin JWT belongs to a deleted user", async () => {
+    const jwtToken = await AuthGenerateJWT(makeUser({ role: "admin" }));
+    mockedUsersDataGet.mockResolvedValue(null);
+
+    const res = mockRes();
+    await expectUnauthenticated(
+      AuthMustBeAdmin(mockReq(`Bearer ${jwtToken}`), res),
+      res,
+    );
+  });
+
+  it("should allow an admin JWT whose live role is admin", async () => {
+    const admin = makeUser({ role: "admin" });
+    mockedUsersDataGet.mockResolvedValue(admin);
+    const jwtToken = await AuthGenerateJWT(admin);
+
+    const res = mockRes();
+    await AuthMustBeAdmin(mockReq(`Bearer ${jwtToken}`), res);
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  it("should load the live user once per request across guards", async () => {
+    const admin = makeUser({ role: "admin" });
+    mockedUsersDataGet.mockResolvedValue(admin);
+    const req = mockReq(`Bearer ${await AuthGenerateJWT(admin)}`);
+
+    await AuthMustBeAdmin(req, mockRes());
+    await AuthMustBeAuthenticated(req, mockRes());
+    await AuthHasScope(req, mockRes(), "traces");
+
+    expect(mockedUsersDataGet).toHaveBeenCalledTimes(1);
+  });
+
+  it("should answer 401 for an authenticated JWT whose user was deleted", async () => {
+    const user = makeUser();
+    const jwtToken = await AuthGenerateJWT(user);
+    mockedUsersDataGet.mockResolvedValue(null);
+
+    const res = mockRes();
+    await expectUnauthenticated(
+      AuthMustBeAuthenticated(mockReq(`Bearer ${jwtToken}`), res),
+      res,
+    );
+  });
+
+  it("should deny a scope that was revoked after the JWT was issued", async () => {
+    const user = makeUser({ role: "user", scopes: ["traces"] });
+    const jwtToken = await AuthGenerateJWT(user);
+    mockedUsersDataGet.mockResolvedValue(makeUser({ role: "user", scopes: [] }));
+
+    const res = mockRes();
+    await expectForbidden(
+      AuthHasScope(mockReq(`Bearer ${jwtToken}`), res, "traces"),
+      res,
+    );
+  });
+
+  it("should return the live user from AuthGetLiveUser rather than the claims", async () => {
+    const token = await AuthGenerateJWT(
+      makeUser({ name: "old-name", role: "admin" }),
+    );
+    const liveUser = makeUser({ name: "new-name", role: "user" });
+    mockedUsersDataGet.mockResolvedValue(liveUser);
+
+    const result = await AuthGetLiveUser(mockReq(`Bearer ${token}`));
+    expect(result).toBe(liveUser);
+  });
+
+  it("should keep AuthGetUserSession claim-based for display use", async () => {
+    const user = makeUser({ role: "admin", name: "display-name" });
+    const jwtToken = await AuthGenerateJWT(user);
+    mockedUsersDataGet.mockResolvedValue(makeUser({ role: "user" }));
+
+    const session = await AuthGetUserSession(mockReq(`Bearer ${jwtToken}`));
+    expect(session.isAuthenticated).toBe(true);
+    expect(session.role).toBe("admin");
+    expect(session.userName).toBe("display-name");
+  });
+});
+
+describe("Rate limit defaults", () => {
+  it("should expose the default login/refresh limits and window", async () => {
+    await AuthInit(undefined as never, makeConfig(), APP_SCOPES);
+    expect(AuthGetRateLimitLoginMax()).toBe(10);
+    expect(AuthGetRateLimitRefreshMax()).toBe(60);
+    expect(AuthGetRateLimitWindowSeconds()).toBe(60);
+  });
+
+  it("should expose configured rate limits", async () => {
+    await AuthInit(
+      undefined as never,
+      makeConfig({
+        AUTH_RATE_LIMIT_LOGIN_MAX: 3,
+        AUTH_RATE_LIMIT_REFRESH_MAX: 7,
+        AUTH_RATE_LIMIT_WINDOW_SECONDS: 30,
+      }),
+      APP_SCOPES,
+    );
+    expect(AuthGetRateLimitLoginMax()).toBe(3);
+    expect(AuthGetRateLimitRefreshMax()).toBe(7);
+    expect(AuthGetRateLimitWindowSeconds()).toBe(30);
   });
 });
 
@@ -377,7 +531,7 @@ describe("JWT revocation (JWT_REVOCATION_ENABLED)", () => {
     mockedQuery.mockReset();
     mockedQuery.mockResolvedValue([{ value: "revocation-key" }]);
     await AuthInit(
-      null as never,
+      undefined as never,
       makeConfig({ JWT_REVOCATION_ENABLED: true }),
       ["traces", "metrics", "logs"],
     );
@@ -402,7 +556,7 @@ describe("JWT revocation (JWT_REVOCATION_ENABLED)", () => {
     );
 
     const res = mockRes();
-    await expectAccessDenied(
+    await expectUnauthenticated(
       AuthMustBeAuthenticated(mockReq(`Bearer ${jwtToken}`), res),
       res,
     );
@@ -414,20 +568,21 @@ describe("JWT revocation (JWT_REVOCATION_ENABLED)", () => {
     mockedUsersDataGet.mockResolvedValue(null);
 
     const res = mockRes();
-    await expectAccessDenied(
+    await expectUnauthenticated(
       AuthMustBeAuthenticated(mockReq(`Bearer ${jwtToken}`), res),
       res,
     );
   });
 
-  it("should accept admin JWTs even when the user row is only re-read once", async () => {
+  it("should check the live user once per request across guards", async () => {
     const admin = makeUser({ id: "revoke-admin", role: "admin" });
     mockedUsersDataGet.mockResolvedValue(admin);
 
-    const jwtToken = await AuthGenerateJWT(admin);
+    const req = mockReq(`Bearer ${await AuthGenerateJWT(admin)}`);
     const res = mockRes();
-    await AuthMustBeAdmin(mockReq(`Bearer ${jwtToken}`), res);
-    await AuthGetUserSession(mockReq(`Bearer ${jwtToken}-second`));
+    await AuthMustBeAdmin(req, res);
+    await AuthGetUserSession(req);
     expect(res.status).not.toHaveBeenCalled();
+    expect(mockedUsersDataGet).toHaveBeenCalledTimes(1);
   });
 });

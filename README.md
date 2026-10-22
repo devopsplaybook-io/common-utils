@@ -125,9 +125,12 @@ await config.reload();
 | `JWT_VALIDITY_DURATION`                           | `8035200` (3 months)                 | No                                  |
 | `JWT_REVOCATION_ENABLED`                          | `false`                              | No                                  |
 | `API_TOKENS_MAX_PER_USER`                         | `100`                                | No                                  |
+| `AUTH_RATE_LIMIT_LOGIN_MAX`                       | `10` (`<= 0` disables)               | No                                  |
+| `AUTH_RATE_LIMIT_REFRESH_MAX`                     | `60` (`<= 0` disables)               | No                                  |
+| `AUTH_RATE_LIMIT_WINDOW_SECONDS`                  | `60`                                 | No                                  |
 | `CORS_POLICY_ORIGIN`                              | `""`                                 | No                                  |
 | `DATA_DIR`                                        | `/data`                              | No                                  |
-| `JWT_KEY`                                         | `uuidv4()`                           | Yes                                 |
+| `JWT_KEY`                                         | `""` (DB-managed, see `AuthInit`)    | Yes                                 |
 | `LOG_LEVEL`                                       | `"info"`                             | No                                  |
 | `DATABASE_TYPE`                                   | `"sqlite"`                           | No                                  |
 | `DATABASE_POSTGRES_HOST`                          | `""`                                 | No                                  |
@@ -140,6 +143,8 @@ await config.reload();
 | All `OPENTELEMETRY_COLLECTOR_*` fields            | Various                              | No (except `_AUTHORIZATION_HEADER`) |
 
 `VERSION` is detected from the library's own `package.json` (correct also for the published layout) and can be overridden like any other field via the `VERSION` environment variable or the config file. `SERVICE_ID` can be overridden the same way. Values loaded from the environment or the config file are coerced to the type of the default value (numbers, booleans, arrays), so `"DATABASE_POSTGRES_PORT": "5433"` in `config.json` is applied as the number `5433`. An unsupported `DATABASE_TYPE` makes `DbUtilsInit` reject with an explicit error.
+
+`JWT_KEY` defaults to an empty string, which means **DB-managed**: `AuthInit` loads the key from `metadata.auth_token` and generates/persists one when absent. A non-empty value from the environment or the config file always takes precedence and is never written to the database (see the auth section for precedence and rotation).
 
 ---
 
@@ -437,13 +442,16 @@ fastify.register(new UsersRoutes().getRoutes, { prefix: "/api/users" });
 | Export                       | Description                                                            |
 | ---------------------------- | ---------------------------------------------------------------------- |
 | `AuthSetOTel`                | Injects the OTel tracer used by the auth module (before `AuthInit`)    |
-| `AuthInit`                   | Registers app scopes, loads or generates the JWT key from `metadata` (under an advisory lock) |
+| `AuthInit`                   | Registers app scopes, then resolves the JWT key: a non-empty configured `JWT_KEY` wins (never persisted); otherwise the key is loaded from `metadata` or generated and persisted (under an advisory lock) |
 | `AuthGenerateJWT`            | Signs a JWT for a user (admins get all scopes)                         |
-| `AuthMustBeAuthenticated`    | 403 guard: any valid JWT **or user API token**                         |
-| `AuthMustBeAdmin`            | 403 guard: `role === "admin"`                                          |
-| `AuthHasScope`               | 403 guard: admin or credentials containing the requested scope         |
-| `AuthGetUserSession`         | Returns the `UserSession` decoded from the request credentials         |
+| `AuthGetLiveUser`            | Resolves the user behind the request credentials from the database (cached per request); `null` when unauthenticated, deleted or revoked. **Use this for authorization.** |
+| `AuthMustBeAuthenticated`    | Guard: 401 `UNAUTHENTICATED` when not authenticated / user deleted, otherwise any valid JWT or user API token |
+| `AuthMustBeAdmin`            | Guard: 401 `UNAUTHENTICATED` when unauthenticated, 403 `FORBIDDEN` when the **live** role is not `admin` |
+| `AuthHasScope`               | Guard: 401 `UNAUTHENTICATED` when unauthenticated, 403 `FORBIDDEN` unless the **live** user is admin or has the scope |
+| `AuthGetUserSession`         | Returns the `UserSession` decoded from the request credentials (claims; display only, never authorization) |
+| `AUTH_ERROR_CODE_UNAUTHENTICATED` / `AUTH_ERROR_CODE_FORBIDDEN` / `AUTH_ERROR_CODE_INVALID_CREDENTIALS` | Stable machine-readable codes (`"UNAUTHENTICATED"`, `"FORBIDDEN"`, `"INVALID_CREDENTIALS"`) |
 | `AuthJwtRevocationEnabled` / `AuthGetApiTokensMaxPerUser` | Current `JWT_REVOCATION_ENABLED` / `API_TOKENS_MAX_PER_USER` values |
+| `AuthGetRateLimitLoginMax` / `AuthGetRateLimitRefreshMax` / `AuthGetRateLimitWindowSeconds` | Current `AUTH_RATE_LIMIT_*` values (defaults 10 / 60 / 60) |
 | `User`, `UserRole`, `UserScope` | User model; scopes are application-defined strings. `User.fromJson(payload)` returns `null` when the payload is missing **or has no `id`** — it never fabricates a fresh identity for an unidentified payload |
 | `UserSession`                | Decoded session: `isAuthenticated`, `userId`, `userName`, `role`, `scopes` |
 | `UserApiToken`               | API token model (only the SHA-256 hash is persisted)                   |
@@ -453,7 +461,19 @@ fastify.register(new UsersRoutes().getRoutes, { prefix: "/api/users" });
 | `isUniqueViolationError`     | Detects unique-constraint violations (SQLite/Postgres)                 |
 | `UsersApiTokensDataSetOTel`  | Injects the OTel tracer used by the API tokens data module             |
 | `UsersApiTokensData*`        | API tokens table CRUD (`Get`, `GetByTokenHash`, `ListByUser`, `CountByUser`, `Add`, `Delete`, `DeleteByUser`, `SetLastUsed`) |
-| `UsersRoutes`                | Fastify routes: `GET /status/initialization`, `POST /session` (login), `POST /session/refresh` (renew an authenticated session), user CRUD, `PUT /password`, API tokens (`POST/GET /tokens`, `DELETE /tokens/:id`) |
+| `UsersRoutes`                | Fastify routes: `GET /status/initialization`, `POST /session` (login), `POST /session/refresh` (renew an authenticated session), user CRUD, `PUT /password`, API tokens (`POST/GET /tokens`, `DELETE /tokens/:id`); login/refresh are rate limited |
+
+**Live authorization**: the guards (`AuthMustBeAuthenticated`, `AuthMustBeAdmin`, `AuthHasScope`) and `AuthGetLiveUser` resolve the user from the database on every request, caching the result (including a missing user) on the request so a guard and the route handler share one query. The JWT `role`/`scopes` claims are therefore **not** authoritative: a demoted admin loses admin rights on the next request, a revoked scope is denied immediately and a deleted user is rejected. `AuthGetUserSession` still returns the claims and must only be used for display/non-authorization purposes. With `JWT_REVOCATION_ENABLED` the tokenVersion check reuses the same live-user read.
+
+**Status codes**: unauthenticated (missing/expired/revoked credentials or deleted user) → **401** with `{ error: "Authentication Required", code: "UNAUTHENTICATED" }`; authenticated but not allowed → **403** with `{ error: "Access Denied", code: "FORBIDDEN" }`. Failed logins (unknown user or wrong password) answer **401** with `{ error: "Authentication Failed", code: "INVALID_CREDENTIALS" }` so clients can keep an existing session; a wrong old password on `PUT /password` stays 403. The guards send the response and then throw — callers must wrap them in `try/catch` and `return` from the catch block (see the `UsersRoutes` implementations).
+
+**JWT key precedence and rotation**: precedence is non-empty environment/config `JWT_KEY` > `metadata.auth_token` > generated and persisted value. `AuthInit` never reads or writes the database when a non-empty key is configured, and never logs the key. Changing the configured key (or the stored metadata value) invalidates every previously issued session; to keep a DB-managed key after removing a configured value, update `metadata` (`UPDATE metadata SET value='<new>' WHERE "type"='auth_token'`). With `JWT_REVOCATION_ENABLED=true` (default `false`), every JWT request re-reads the user and rejects tokens whose `tokenVersion` claim is stale; password changes, role/scope changes and deletion therefore invalidate previously issued JWTs. This requires the `users.tokenVersion` column.
+
+**Rate limiting**: `POST /session` is limited per IP + lowercased username (default 10 per 60 s) and `POST /session/refresh` per IP (default 60 per 60 s); configure with `AUTH_RATE_LIMIT_LOGIN_MAX`, `AUTH_RATE_LIMIT_REFRESH_MAX` and `AUTH_RATE_LIMIT_WINDOW_SECONDS`. A value `<= 0` disables the limiter for that route. Exceeding a limit answers **429** with `{ error: "Too Many Requests", code: "RATE_LIMITED", ... }` and a `Retry-After` header. The limiter is registered lazily by `UsersRoutes` (`@fastify/rate-limit`, `hook: "preHandler"` so the login body is parsed before keying). Behind a trusted reverse proxy, enable Fastify's `trustProxy` so the client IP is used instead of the proxy's; otherwise proxy-level limits are recommended.
+
+**Response caching**: the credential responses (`POST /session`, `POST /session/refresh`, `POST /tokens`) send `Cache-Control: no-store`, `Pragma: no-cache` and `Vary: Authorization`.
+
+**2.0.0 breaking changes**: unauthenticated requests now answer **401** with a code instead of 403 (login failures answer 401 `INVALID_CREDENTIALS` instead of 403); the guards and `ProjectAccess`-style helpers must use `AuthGetLiveUser` because the JWT role/scopes claims are no longer authoritative; `ConfigBase.JWT_KEY` now defaults to `""` and a configured value is honored instead of being overwritten from the database; login/refresh are throttled by default; `@fastify/rate-limit` is a new runtime dependency.
 
 **Schema requirements**
 
@@ -469,7 +489,7 @@ SQL is written SQLite-first; the `DbUtils` facade converts placeholders for Post
 
 **JWT revocation (opt-in)**: `role` and `scopes` are baked into a JWT at signing time, so a token stays valid (default 3 months) after the user is deleted or their role changes. With `JWT_REVOCATION_ENABLED=true` (default `false`, the default validity is unchanged) every JWT request re-reads the user and rejects tokens whose `tokenVersion` claim is stale; password changes, role/scope changes and deletion therefore invalidate previously issued JWTs. This requires the `users.tokenVersion` column. JWTs are always verified as HS256 (`algorithms: ["HS256"]` is pinned); `iss`/`aud` are not set.
 
-**Response conventions**: creation answers 201, reads and deletes answer 200. Malformed or bodyless writes answer 400 (`Missing: …`) instead of HTTP 500, and the last remaining admin cannot demote or delete themselves (`At least 1 admin must be defined`). `GET /` is paginated with `?limit=&offset=` (invalid values answer 400); the bootstrap emptiness check and the last-admin guards use `COUNT(*)` queries instead of loading every row. The 403 guards (`AuthMustBeAuthenticated`, `AuthMustBeAdmin`, `AuthHasScope`) **send the 403 response and then throw** — callers must wrap the guard in `try/catch` and `return` from the catch block (see the `UsersRoutes` implementations) so the route does not continue after the response.
+**Response conventions**: creation answers 201, reads and deletes answer 200. Malformed or bodyless writes answer 400 (`Missing: …`) instead of HTTP 500, and the last remaining admin cannot demote or delete themselves (`At least 1 admin must be defined`). `GET /` is paginated with `?limit=&offset=` (invalid values answer 400); the bootstrap emptiness check and the last-admin guards use `COUNT(*)` queries instead of loading every row. Unauthenticated requests answer 401 `UNAUTHENTICATED`, forbidden ones 403 `FORBIDDEN`; the guards **send the response and then throw** — callers must wrap the guard in `try/catch` and `return` from the catch block (see the `UsersRoutes` implementations) so the route does not continue after the response.
 
 ---
 
