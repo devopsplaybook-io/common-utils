@@ -23,10 +23,29 @@ export interface AuthConfig {
   JWT_REVOCATION_ENABLED?: boolean;
   /** Per-user API token cap (defaults to 100 when unset). */
   API_TOKENS_MAX_PER_USER?: number;
+  /** Login attempts allowed per window (defaults to 10; <= 0 disables). */
+  AUTH_RATE_LIMIT_LOGIN_MAX?: number;
+  /** Session refreshes allowed per window (defaults to 60; <= 0 disables). */
+  AUTH_RATE_LIMIT_REFRESH_MAX?: number;
+  /** Rate-limit window in seconds (defaults to 60). */
+  AUTH_RATE_LIMIT_WINDOW_SECONDS?: number;
 }
+
+/**
+ * Stable machine-readable error codes so API clients can tell an
+ * unauthenticated request (401, session expired / logged out) apart from an
+ * authenticated-but-forbidden one (403) and from bad login credentials (401
+ * with `INVALID_CREDENTIALS`, which must not destroy an existing session).
+ */
+export const AUTH_ERROR_CODE_UNAUTHENTICATED = "UNAUTHENTICATED";
+export const AUTH_ERROR_CODE_FORBIDDEN = "FORBIDDEN";
+export const AUTH_ERROR_CODE_INVALID_CREDENTIALS = "INVALID_CREDENTIALS";
 
 /** Default per-user API token cap when the config field is not set. */
 const DEFAULT_API_TOKENS_MAX_PER_USER = 100;
+const DEFAULT_RATE_LIMIT_LOGIN_MAX = 10;
+const DEFAULT_RATE_LIMIT_REFRESH_MAX = 60;
+const DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60;
 
 /**
  * Rejected non-JWT credentials are remembered for a short time so that a
@@ -63,17 +82,39 @@ export function AuthGetApiTokensMaxPerUser(): number {
   return config?.API_TOKENS_MAX_PER_USER ?? DEFAULT_API_TOKENS_MAX_PER_USER;
 }
 
+/** Configured login rate limit (`AUTH_RATE_LIMIT_LOGIN_MAX`). */
+export function AuthGetRateLimitLoginMax(): number {
+  return config?.AUTH_RATE_LIMIT_LOGIN_MAX ?? DEFAULT_RATE_LIMIT_LOGIN_MAX;
+}
+
+/** Configured session-refresh rate limit (`AUTH_RATE_LIMIT_REFRESH_MAX`). */
+export function AuthGetRateLimitRefreshMax(): number {
+  return config?.AUTH_RATE_LIMIT_REFRESH_MAX ?? DEFAULT_RATE_LIMIT_REFRESH_MAX;
+}
+
+/** Configured rate-limit window in seconds (`AUTH_RATE_LIMIT_WINDOW_SECONDS`). */
+export function AuthGetRateLimitWindowSeconds(): number {
+  return (
+    config?.AUTH_RATE_LIMIT_WINDOW_SECONDS ?? DEFAULT_RATE_LIMIT_WINDOW_SECONDS
+  );
+}
+
 /**
  * Initialise the auth module.
  *
- * Registers the full scope set of the host application and loads the JWT
- * signing key from the `metadata` table. When no key is stored yet, a fresh
- * one is generated and persisted. The read/create sequence runs under an
+ * Registers the full scope set of the host application and resolves the JWT
+ * signing key. An explicitly configured (non-empty) `JWT_KEY` always wins and
+ * is never read from or written to the database; when it is empty the key is
+ * loaded from the `metadata` table, and a fresh one is generated and
+ * persisted when none is stored yet. The read/create sequence runs under an
  * advisory lock on Postgres so concurrently booting replicas agree on a
  * single key; SQLite has a single writer (see README).
  *
+ * Changing the key invalidates every previously issued JWT.
+ *
  * @param context    Parent OTel span.
- * @param configIn   Server configuration (JWT_KEY is updated in place).
+ * @param configIn   Server configuration (JWT_KEY is updated in place when
+ *                   it is DB-managed).
  * @param allScopes  All scopes supported by the host application.
  */
 export async function AuthInit(
@@ -85,6 +126,10 @@ export async function AuthInit(
   User.ALL_SCOPES = [...allScopes];
   const span = tracer.startSpan("AuthInit", context);
   try {
+    if ((configIn.JWT_KEY ?? "") !== "") {
+      // Operator-provided key: honor it, never read or overwrite the DB key.
+      return;
+    }
     await DbUtilsWithLock(
       "auth_token",
       async () => {
@@ -135,9 +180,9 @@ export async function AuthGenerateJWT(user: User): Promise<string> {
  * payload mirroring the owning user's live role and scopes is built (valid
  * until the token is revoked or expires).
  *
- * When `JWT_REVOCATION_ENABLED` is on, the live user is re-read after
- * verification and the token is rejected when the user is gone or its
- * `tokenVersion` differs from the claim.
+ * When `JWT_REVOCATION_ENABLED` is on, the live user is loaded (and cached on
+ * the request) after verification and the token is rejected when the user is
+ * gone or its `tokenVersion` differs from the claim.
  */
 async function jwtDecodeCached(req: any): Promise<any | null> {
   if (req._jwtPayload) {
@@ -155,32 +200,63 @@ async function jwtDecodeCached(req: any): Promise<any | null> {
   try {
     info = jwt.verify(token, config.JWT_KEY, { algorithms: ["HS256"] });
   } catch {
-    const apiInfo = await resolveApiToken(token);
+    const apiInfo = await resolveApiToken(req, token);
     if (apiInfo) {
       req._jwtPayload = apiInfo;
       return apiInfo;
     }
     return null;
   }
-  if (config.JWT_REVOCATION_ENABLED && !(await isTokenVersionCurrent(info))) {
-    return null;
+  if (config.JWT_REVOCATION_ENABLED) {
+    const user = await loadLiveUser(req, info);
+    if (
+      !user ||
+      Number(user.tokenVersion ?? 0) !== Number(info.tokenVersion ?? 0)
+    ) {
+      return null;
+    }
   }
   req._jwtPayload = info;
   return info;
 }
 
-/** Re-read the user and compare its live `tokenVersion` with the claim. */
-async function isTokenVersionCurrent(info: any): Promise<boolean> {
-  const span = tracer.startSpan("AuthCheckTokenVersion");
+/**
+ * Resolve the user referenced by the verified credentials from the database,
+ * caching the result (including a missing user) on the request so a guard and
+ * route handlers share one query.
+ */
+async function loadLiveUser(req: any, info: any): Promise<User | null> {
+  if (req._authLiveUserLoaded) {
+    return req._authLiveUser;
+  }
+  req._authLiveUserLoaded = true;
+  const span = tracer.startSpan("AuthGetLiveUser");
   try {
-    const user = await UsersDataGet(span, info.userId);
-    if (!user) {
-      return false;
-    }
-    return Number(user.tokenVersion ?? 0) === Number(info.tokenVersion ?? 0);
+    req._authLiveUser = info?.userId
+      ? await UsersDataGet(span, info.userId)
+      : null;
   } finally {
     span.end();
   }
+  return req._authLiveUser;
+}
+
+/**
+ * Return the live user behind the request credentials or `null` when the
+ * request is unauthenticated, the user was deleted, or (with
+ * `JWT_REVOCATION_ENABLED`) the token was issued before a role/scope/password
+ * change. Authorization must use this function (or the guards below), not the
+ * role/scopes claims of `AuthGetUserSession`.
+ */
+export async function AuthGetLiveUser(req: any): Promise<User | null> {
+  if (req._authLiveUserLoaded) {
+    return req._authLiveUser;
+  }
+  const info = await jwtDecodeCached(req);
+  if (!info) {
+    return null;
+  }
+  return loadLiveUser(req, info);
 }
 
 function isKnownRejectedCredential(tokenHash: string): boolean {
@@ -226,7 +302,7 @@ function shouldWriteLastUsed(tokenId: string): boolean {
  * Permissions are read from the user record at resolution time, so
  * role/scope changes apply to existing tokens immediately.
  */
-async function resolveApiToken(token: string): Promise<any | null> {
+async function resolveApiToken(req: any, token: string): Promise<any | null> {
   const tokenHash = createHash("sha256").update(token).digest("hex");
   if (isKnownRejectedCredential(tokenHash)) {
     return null;
@@ -247,6 +323,9 @@ async function resolveApiToken(token: string): Promise<any | null> {
       rememberRejectedCredential(tokenHash);
       return null;
     }
+    // Share the freshly loaded user with AuthGetLiveUser / the guards.
+    req._authLiveUser = user;
+    req._authLiveUserLoaded = true;
     if (shouldWriteLastUsed(apiToken.id)) {
       try {
         await UsersApiTokensDataSetLastUsed(
@@ -273,19 +352,32 @@ export async function AuthMustBeAuthenticated(
   req: any,
   res: any,
 ): Promise<void> {
-  if (!(await jwtDecodeCached(req))) {
-    res.status(403).send({ error: "Access Denied" });
-    throw new Error("Access Denied");
+  const user = await AuthGetLiveUser(req);
+  if (!user) {
+    res.status(401).send({
+      error: "Authentication Required",
+      code: AUTH_ERROR_CODE_UNAUTHENTICATED,
+    });
+    throw new Error("Authentication Required");
   }
 }
 
 export async function AuthMustBeAdmin(req: any, res: any): Promise<void> {
-  const info = await jwtDecodeCached(req);
-  if (info?.role === "admin") {
-    return;
+  const user = await AuthGetLiveUser(req);
+  if (!user) {
+    res.status(401).send({
+      error: "Authentication Required",
+      code: AUTH_ERROR_CODE_UNAUTHENTICATED,
+    });
+    throw new Error("Authentication Required");
   }
-  res.status(403).send({ error: "Access Denied" });
-  throw new Error("Access Denied");
+  if (user.role !== "admin") {
+    res.status(403).send({
+      error: "Access Denied",
+      code: AUTH_ERROR_CODE_FORBIDDEN,
+    });
+    throw new Error("Access Denied");
+  }
 }
 
 export async function AuthHasScope(
@@ -293,22 +385,33 @@ export async function AuthHasScope(
   res: any,
   scope: UserScope,
 ): Promise<void> {
-  const info = await jwtDecodeCached(req);
-  if (!info) {
-    res.status(403).send({ error: "Access Denied" });
-    throw new Error("Access Denied");
+  const user = await AuthGetLiveUser(req);
+  if (!user) {
+    res.status(401).send({
+      error: "Authentication Required",
+      code: AUTH_ERROR_CODE_UNAUTHENTICATED,
+    });
+    throw new Error("Authentication Required");
   }
-  if (info.role === "admin") {
+  if (user.role === "admin") {
     return;
   }
-  const scopes: UserScope[] = info.scopes || [];
+  const scopes: UserScope[] = user.scopes || [];
   if (scopes.includes(scope)) {
     return;
   }
-  res.status(403).send({ error: "Access Denied" });
+  res.status(403).send({
+    error: "Access Denied",
+    code: AUTH_ERROR_CODE_FORBIDDEN,
+  });
   throw new Error("Access Denied");
 }
 
+/**
+ * Decoded session claims for display purposes only. Authorization must never
+ * rely on these role/scopes claims: use `AuthGetLiveUser` or the guards,
+ * which resolve the live user from the database.
+ */
 export async function AuthGetUserSession(req: any): Promise<UserSession> {
   const userSession: UserSession = { isAuthenticated: false };
   const info = await jwtDecodeCached(req);

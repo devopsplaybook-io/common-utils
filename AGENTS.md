@@ -86,6 +86,7 @@ All three commands must pass before committing. The CI pipeline (`reusable-npm-m
 | `fs-extra`                              | Async/sync file operations, `readJson`/`ensureDir`                                         |
 | `bcrypt`                                | Password hashing (users module)                                                            |
 | `jsonwebtoken`                          | JWT signing/verification (auth module)                                                     |
+| `@fastify/rate-limit`                   | Per-route login/refresh throttling registered by `UsersRoutes`                             |
 | `fastify`                               | HTTP framework types used by `UsersRoutes`                                                 |
 
 ## Known Gotchas

@@ -65,6 +65,11 @@ async function initAuth(overrides: Record<string, unknown> = {}): Promise<void> 
       JWT_KEY: "",
       JWT_VALIDITY_DURATION: 3600,
       DATABASE_TYPE: "sqlite",
+      // Keep the shared suite well below the limits: dedicated rate-limit
+      // tests live in UsersRoutesRateLimit.spec.ts.
+      AUTH_RATE_LIMIT_LOGIN_MAX: 1000,
+      AUTH_RATE_LIMIT_REFRESH_MAX: 1000,
+      AUTH_RATE_LIMIT_WINDOW_SECONDS: 60,
       ...overrides,
     } as never,
     APP_SCOPES,
@@ -192,7 +197,8 @@ describe("UsersRoutes: bootstrap and session", () => {
       payload: { name: "intruder", password: "intruder-pass" },
     });
 
-    expect(res.statusCode).toBe(403);
+    expect(res.statusCode).toBe(401);
+    expect(res.json().code).toBe("UNAUTHENTICATED");
   });
 
   it("logs in with valid credentials and rejects invalid ones", async () => {
@@ -206,20 +212,29 @@ describe("UsersRoutes: bootstrap and session", () => {
     expect(ok.statusCode).toBe(201);
     expect(typeof ok.json().token).toBe("string");
     expect(ok.json().user.name).toBe("root");
+    // Credential-bearing responses must never be cached.
+    expect(ok.headers["cache-control"]).toBe("no-store");
+    expect(ok.headers.pragma).toBe("no-cache");
+    expect(ok.headers.vary).toBe("Authorization");
 
     const wrongPassword = await app.inject({
       method: "POST",
       url: "/api/users/session",
       payload: { name: "root", password: "nope" },
     });
-    expect(wrongPassword.statusCode).toBe(403);
+    expect(wrongPassword.statusCode).toBe(401);
+    expect(wrongPassword.json()).toEqual({
+      error: "Authentication Failed",
+      code: "INVALID_CREDENTIALS",
+    });
 
     const unknownUser = await app.inject({
       method: "POST",
       url: "/api/users/session",
       payload: { name: "nobody", password: "nope" },
     });
-    expect(unknownUser.statusCode).toBe(403);
+    expect(unknownUser.statusCode).toBe(401);
+    expect(unknownUser.json().code).toBe("INVALID_CREDENTIALS");
 
     const missing = await app.inject({
       method: "POST",
@@ -241,6 +256,7 @@ describe("UsersRoutes: bootstrap and session", () => {
     expect(renewed.statusCode).toBe(201);
     expect(renewed.json().success).toBe(true);
     expect(renewed.json().user.name).toBe("root");
+    expect(renewed.headers["cache-control"]).toBe("no-store");
     expect(
       await AuthGetUserSession({ headers: auth(renewed.json().token) }),
     ).toMatchObject({ isAuthenticated: true, userName: "root" });
@@ -251,14 +267,16 @@ describe("UsersRoutes: bootstrap and session", () => {
       method: "POST",
       url: "/api/users/session/refresh",
     });
-    expect(unauthenticated.statusCode).toBe(403);
+    expect(unauthenticated.statusCode).toBe(401);
+    expect(unauthenticated.json().code).toBe("UNAUTHENTICATED");
 
     const invalid = await app.inject({
       method: "POST",
       url: "/api/users/session/refresh",
       headers: auth("invalid-token"),
     });
-    expect(invalid.statusCode).toBe(403);
+    expect(invalid.statusCode).toBe(401);
+    expect(invalid.json().code).toBe("UNAUTHENTICATED");
   });
 });
 
@@ -421,6 +439,7 @@ describe("UsersRoutes: user listing", () => {
       headers: auth(bobToken),
     });
     expect(forbidden.statusCode).toBe(403);
+    expect(forbidden.json().code).toBe("FORBIDDEN");
   });
 });
 
@@ -439,6 +458,10 @@ describe("UsersRoutes: API tokens", () => {
     expect(apiToken.length).toBeGreaterThanOrEqual(40);
     expect(created.json().tokenHash).toBeUndefined();
     expect(created.json().expiresAt).toBeNull();
+    // The plaintext token is a credential: the response must not be cached.
+    expect(created.headers["cache-control"]).toBe("no-store");
+    expect(created.headers.pragma).toBe("no-cache");
+    expect(created.headers.vary).toBe("Authorization");
 
     // The plaintext token authenticates as its owner
     const listed = await app.inject({
@@ -472,7 +495,8 @@ describe("UsersRoutes: API tokens", () => {
       url: "/api/users/tokens",
       headers: auth(apiToken),
     });
-    expect(rejected.statusCode).toBe(403);
+    expect(rejected.statusCode).toBe(401);
+    expect(rejected.json().code).toBe("UNAUTHENTICATED");
   });
 
   it("enforces the owner/admin revoke matrix", async () => {
@@ -512,7 +536,8 @@ describe("UsersRoutes: API tokens", () => {
       method: "GET",
       url: "/api/users/tokens",
     });
-    expect(unauthenticated.statusCode).toBe(403);
+    expect(unauthenticated.statusCode).toBe(401);
+    expect(unauthenticated.json().code).toBe("UNAUTHENTICATED");
   });
 
   it("rejects an expired stored token", async () => {
@@ -538,7 +563,8 @@ describe("UsersRoutes: API tokens", () => {
       url: "/api/users/tokens",
       headers: auth(apiToken),
     });
-    expect(rejected.statusCode).toBe(403);
+    expect(rejected.statusCode).toBe(401);
+    expect(rejected.json().code).toBe("UNAUTHENTICATED");
   });
 
   it("validates the token name and expiry", async () => {
@@ -644,7 +670,8 @@ describe("UsersRoutes: JWT revocation", () => {
       url: "/api/users/tokens",
       headers: auth(jwtToken),
     });
-    expect(after.statusCode).toBe(403);
+    expect(after.statusCode).toBe(401);
+    expect(after.json().code).toBe("UNAUTHENTICATED");
 
     // The new password still works
     const relogin = await app.inject({

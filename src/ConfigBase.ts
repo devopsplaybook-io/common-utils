@@ -1,6 +1,5 @@
 import { ConfigOTelInterface } from "@devopsplaybook.io/otel-utils";
 import * as fse from "fs-extra";
-import { v4 as uuidv4 } from "uuid";
 import path from "path";
 
 /**
@@ -53,6 +52,12 @@ export interface ConfigCommonInterface
   JWT_VALIDITY_DURATION: number;
   JWT_REVOCATION_ENABLED: boolean;
   API_TOKENS_MAX_PER_USER: number;
+  /** Login attempts allowed per rate-limit window (`<= 0` disables). */
+  AUTH_RATE_LIMIT_LOGIN_MAX: number;
+  /** Session refreshes allowed per rate-limit window (`<= 0` disables). */
+  AUTH_RATE_LIMIT_REFRESH_MAX: number;
+  /** Rate-limit window in seconds. */
+  AUTH_RATE_LIMIT_WINDOW_SECONDS: number;
   CORS_POLICY_ORIGIN: string;
   DATA_DIR: string;
   JWT_KEY: string;
@@ -151,9 +156,21 @@ export abstract class ConfigBase implements ConfigCommonInterface {
   public JWT_REVOCATION_ENABLED = false;
   /** Maximum number of API tokens a single user may create. */
   public API_TOKENS_MAX_PER_USER = 100;
+  /** Login attempts allowed per rate-limit window (per IP + username). */
+  public AUTH_RATE_LIMIT_LOGIN_MAX = 10;
+  /** Session refreshes allowed per rate-limit window (per IP). */
+  public AUTH_RATE_LIMIT_REFRESH_MAX = 60;
+  /** Rate-limit window in seconds. */
+  public AUTH_RATE_LIMIT_WINDOW_SECONDS = 60;
   public CORS_POLICY_ORIGIN = "";
   public DATA_DIR = process.env.DATA_DIR || "/data";
-  public JWT_KEY: string = uuidv4();
+  /**
+   * JWT signing key. Empty (the default) means DB-managed: `AuthInit` loads
+   * the key from `metadata.auth_token` or generates and persists one. A
+   * non-empty value (environment/config) takes precedence and is never
+   * written to the database; changing it invalidates issued sessions.
+   */
+  public JWT_KEY: string = "";
   public LOG_LEVEL = "info";
 
   // -- Database fields --
@@ -202,6 +219,9 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       { field: "JWT_VALIDITY_DURATION" },
       { field: "JWT_REVOCATION_ENABLED" },
       { field: "API_TOKENS_MAX_PER_USER" },
+      { field: "AUTH_RATE_LIMIT_LOGIN_MAX" },
+      { field: "AUTH_RATE_LIMIT_REFRESH_MAX" },
+      { field: "AUTH_RATE_LIMIT_WINDOW_SECONDS" },
       { field: "CORS_POLICY_ORIGIN" },
       { field: "DATA_DIR" },
       { field: "JWT_KEY", sensitive: true },

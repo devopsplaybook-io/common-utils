@@ -1,9 +1,17 @@
 import { createHash, randomBytes } from "crypto";
 import { OTelRequestSpan } from "@devopsplaybook.io/otel-utils-fastify";
-import { FastifyInstance, RequestGenericInterface } from "fastify";
+import rateLimit from "@fastify/rate-limit";
+import { FastifyInstance, FastifyRequest, RequestGenericInterface } from "fastify";
 import {
+  AUTH_ERROR_CODE_FORBIDDEN,
+  AUTH_ERROR_CODE_INVALID_CREDENTIALS,
+  AUTH_ERROR_CODE_UNAUTHENTICATED,
   AuthGenerateJWT,
   AuthGetApiTokensMaxPerUser,
+  AuthGetLiveUser,
+  AuthGetRateLimitLoginMax,
+  AuthGetRateLimitRefreshMax,
+  AuthGetRateLimitWindowSeconds,
   AuthGetUserSession,
   AuthJwtRevocationEnabled,
   AuthMustBeAdmin,
@@ -53,6 +61,22 @@ function parseNonNegativeInt(value: unknown): number | undefined {
   return parsed;
 }
 
+/** Credential-bearing responses must never be cached by browsers or proxies. */
+function setNoStoreHeaders(res: any): void {
+  res
+    .header("cache-control", "no-store")
+    .header("pragma", "no-cache")
+    .header("vary", "Authorization");
+}
+
+/** 401 with the stable unauthenticated code (session expired or logged out). */
+function sendUnauthenticated(res: any): any {
+  return res.status(401).send({
+    error: "Authentication Required",
+    code: AUTH_ERROR_CODE_UNAUTHENTICATED,
+  });
+}
+
 /**
  * Standard user management routes shared across applications:
  * initialization status, login (session), user CRUD and password changes.
@@ -67,6 +91,27 @@ export class UsersRoutes {
 
   public async getRoutes(fastify: FastifyInstance): Promise<void> {
     //
+    // Per-route limits protect the credential endpoints below. The preHandler
+    // hook makes the parsed login body available to the key generator.
+    if (!fastify.hasDecorator("rateLimit")) {
+      await fastify.register(rateLimit, {
+        global: false,
+        hook: "preHandler",
+        errorResponseBuilder: (
+          _req: FastifyRequest,
+          context: { after: string; statusCode: number },
+        ) => ({
+          statusCode: context.statusCode,
+          error: "Too Many Requests",
+          code: "RATE_LIMITED",
+          message: `Rate limit exceeded, retry in ${context.after}`,
+        }),
+      });
+    }
+    const loginMax = AuthGetRateLimitLoginMax();
+    const refreshMax = AuthGetRateLimitRefreshMax();
+    const rateLimitWindowMs = AuthGetRateLimitWindowSeconds() * 1000;
+
     fastify.get("/status/initialization", async (req, res) => {
       const count = await UsersDataCount(OTelRequestSpan(req));
       return res.status(200).send({ initialized: count > 0 });
@@ -80,72 +125,108 @@ export class UsersRoutes {
         password: string;
       };
     }
-    fastify.post<PostSession>("/session", async (req, res) => {
-      const body = req.body ?? {};
-      let user: User | null;
-      // From token
-      const userSession = await AuthGetUserSession(req);
-      if (userSession.isAuthenticated) {
-        // isAuthenticated implies userId is set
-        user = await UsersDataGet(
-          OTelRequestSpan(req),
-          userSession.userId as string,
-        );
-        if (!user) {
-          return res.status(403).send({ error: "Authentication Failed" });
+    fastify.post<PostSession>(
+      "/session",
+      loginMax > 0
+        ? {
+            config: {
+              rateLimit: {
+                max: loginMax,
+                timeWindow: rateLimitWindowMs,
+                keyGenerator: (req: FastifyRequest) => {
+                  const body = (req.body ?? {}) as { name?: unknown };
+                  return `${req.ip}:${String(body.name ?? "")
+                    .trim()
+                    .toLowerCase()
+                    .slice(0, 255)}`;
+                },
+              },
+            },
+          }
+        : {},
+      async (req, res) => {
+        const body = req.body ?? {};
+        let user: User | null;
+        // From token
+        const userSession = await AuthGetUserSession(req);
+        if (userSession.isAuthenticated) {
+          // isAuthenticated implies userId is set
+          user = await UsersDataGet(
+            OTelRequestSpan(req),
+            userSession.userId as string,
+          );
+          if (!user) {
+            return sendUnauthenticated(res);
+          }
+          setNoStoreHeaders(res);
+          return res.status(201).send({
+            success: true,
+            token: await AuthGenerateJWT(user),
+            user: user.toTransportJson(),
+          });
         }
+
+        // From User/Pass
+        if (!body.name) {
+          return res.status(400).send({ error: "Missing: Name" });
+        }
+        if (!body.password) {
+          return res.status(400).send({ error: "Missing: Password" });
+        }
+        user = await UsersDataGetByName(OTelRequestSpan(req), body.name);
+        if (!user) {
+          return res.status(401).send({
+            error: "Authentication Failed",
+            code: AUTH_ERROR_CODE_INVALID_CREDENTIALS,
+          });
+        } else if (
+          await UserPasswordCheckPassword(
+            OTelRequestSpan(req),
+            user,
+            body.password,
+          )
+        ) {
+          setNoStoreHeaders(res);
+          return res.status(201).send({
+            success: true,
+            token: await AuthGenerateJWT(user),
+            user: user.toTransportJson(),
+          });
+        } else {
+          return res.status(401).send({
+            error: "Authentication Failed",
+            code: AUTH_ERROR_CODE_INVALID_CREDENTIALS,
+          });
+        }
+      },
+    );
+
+    fastify.post(
+      "/session/refresh",
+      refreshMax > 0
+        ? {
+            config: {
+              rateLimit: {
+                max: refreshMax,
+                timeWindow: rateLimitWindowMs,
+                keyGenerator: (req: FastifyRequest) => req.ip,
+              },
+            },
+          }
+        : {},
+      async (req, res) => {
+        const user = await AuthGetLiveUser(req);
+        if (!user) {
+          return sendUnauthenticated(res);
+        }
+        setNoStoreHeaders(res);
         return res.status(201).send({
           success: true,
           token: await AuthGenerateJWT(user),
           user: user.toTransportJson(),
         });
-      }
-
-      // From User/Pass
-      if (!body.name) {
-        return res.status(400).send({ error: "Missing: Name" });
-      }
-      if (!body.password) {
-        return res.status(400).send({ error: "Missing: Password" });
-      }
-      user = await UsersDataGetByName(OTelRequestSpan(req), body.name);
-      if (!user) {
-        return res.status(403).send({ error: "Authentication Failed" });
-      } else if (
-        await UserPasswordCheckPassword(
-          OTelRequestSpan(req),
-          user,
-          body.password,
-        )
-      ) {
-        return res.status(201).send({
-          success: true,
-          token: await AuthGenerateJWT(user),
-          user: user.toTransportJson(),
-        });
-      } else {
-        return res.status(403).send({ error: "Authentication Failed" });
-      }
-    });
-
-    fastify.post("/session/refresh", async (req, res) => {
-      const userSession = await AuthGetUserSession(req);
-      if (!userSession.isAuthenticated) {
-        return res.status(403).send({ error: "Authentication Failed" });
-      }
-      const user = await UsersDataGet(
-        OTelRequestSpan(req),
-        userSession.userId as string,
-      );
-      if (!user) {
-        return res.status(403).send({ error: "Authentication Failed" });
-      }
-      return res.status(201).send({
-        success: true,
-        token: await AuthGenerateJWT(user),
-        user: user.toTransportJson(),
-      });
-    });
+      },
+    );
 
     // ==================== LIST USERS (Admin only) ====================
 
@@ -262,14 +343,9 @@ export class UsersRoutes {
     fastify.put<PutOwnPassword>("/password", async (req, res) => {
       const context = OTelRequestSpan(req);
       const body = req.body ?? {};
-      const userSession = await AuthGetUserSession(req);
-      if (!userSession.isAuthenticated) {
-        return res.status(403).send({ error: "Access Denied" });
-      }
-      // isAuthenticated implies userId is set
-      const user = await UsersDataGet(context, userSession.userId as string);
+      const user = await AuthGetLiveUser(req);
       if (!user) {
-        return res.status(403).send({ error: "Access Denied" });
+        return sendUnauthenticated(res);
       }
       if (!body.password) {
         return res.status(400).send({ error: "Missing: Password" });
@@ -277,7 +353,9 @@ export class UsersRoutes {
       if (
         !(await UserPasswordCheckPassword(context, user, body.passwordOld))
       ) {
-        return res.status(403).send({ error: "Old Password Wrong" });
+        return res
+          .status(403)
+          .send({ error: "Old Password Wrong", code: AUTH_ERROR_CODE_FORBIDDEN });
       }
       await UserPasswordSetPassword(context, user, body.password);
       await UsersDataUpdatePassword(context, user);
@@ -383,10 +461,10 @@ export class UsersRoutes {
         return;
       }
 
-      const userSession = await AuthGetUserSession(req);
+      const currentUser = await AuthGetLiveUser(req);
 
       // Cannot delete yourself
-      if (userSession.userId === req.params.id) {
+      if (currentUser?.id === req.params.id) {
         return res.status(400).send({ error: "Cannot Delete Yourself" });
       }
 
@@ -421,9 +499,9 @@ export class UsersRoutes {
     fastify.post<PostApiToken>("/tokens", async (req, res) => {
       const context = OTelRequestSpan(req);
       const body = req.body ?? {};
-      const userSession = await AuthGetUserSession(req);
-      if (!userSession.isAuthenticated) {
-        return res.status(403).send({ error: "Access Denied" });
+      const user = await AuthGetLiveUser(req);
+      if (!user) {
+        return sendUnauthenticated(res);
       }
       if (!body.name || typeof body.name !== "string") {
         return res.status(400).send({ error: "Missing: Name" });
@@ -456,10 +534,7 @@ export class UsersRoutes {
       }
       const maxTokens = AuthGetApiTokensMaxPerUser();
       if (
-        (await UsersApiTokensDataCountByUser(
-          context,
-          userSession.userId as string,
-        )) >= maxTokens
+        (await UsersApiTokensDataCountByUser(context, user.id)) >= maxTokens
       ) {
         return res
           .status(400)
@@ -467,13 +542,13 @@ export class UsersRoutes {
       }
       const apiToken = new UserApiToken();
       apiToken.name = body.name;
-      // isAuthenticated implies userId is set
-      apiToken.userId = userSession.userId as string;
+      apiToken.userId = user.id;
       apiToken.dateCreated = new Date().toISOString();
       apiToken.expiresAt = expiresAt;
       const token = randomBytes(32).toString("base64url");
       apiToken.tokenHash = createHash("sha256").update(token).digest("hex");
       await UsersApiTokensDataAdd(context, apiToken);
+      setNoStoreHeaders(res);
       // The plaintext token is returned once; only its hash is stored.
       return res.status(201).send({
         token,
@@ -483,14 +558,11 @@ export class UsersRoutes {
 
     fastify.get("/tokens", async (req, res) => {
       const context = OTelRequestSpan(req);
-      const userSession = await AuthGetUserSession(req);
-      if (!userSession.isAuthenticated) {
-        return res.status(403).send({ error: "Access Denied" });
+      const user = await AuthGetLiveUser(req);
+      if (!user) {
+        return sendUnauthenticated(res);
       }
-      const apiTokens = await UsersApiTokensDataListByUser(
-        context,
-        userSession.userId as string,
-      );
+      const apiTokens = await UsersApiTokensDataListByUser(context, user.id);
       return res
         .status(200)
         .send(apiTokens.map((t) => t.toTransportJson()));
@@ -503,20 +575,19 @@ export class UsersRoutes {
     }
     fastify.delete<DeleteApiToken>("/tokens/:id", async (req, res) => {
       const context = OTelRequestSpan(req);
-      const userSession = await AuthGetUserSession(req);
-      if (!userSession.isAuthenticated) {
-        return res.status(403).send({ error: "Access Denied" });
+      const user = await AuthGetLiveUser(req);
+      if (!user) {
+        return sendUnauthenticated(res);
       }
       const apiToken = await UsersApiTokensDataGet(context, req.params.id);
       if (!apiToken) {
         return res.status(404).send({ error: "API Token Not Found" });
       }
       // Owner can always revoke; admins can revoke any token
-      if (
-        apiToken.userId !== userSession.userId &&
-        userSession.role !== "admin"
-      ) {
-        return res.status(403).send({ error: "Access Denied" });
+      if (apiToken.userId !== user.id && user.role !== "admin") {
+        return res
+          .status(403)
+          .send({ error: "Access Denied", code: AUTH_ERROR_CODE_FORBIDDEN });
       }
       await UsersApiTokensDataDelete(context, apiToken.id);
       return res.status(200).send({});
