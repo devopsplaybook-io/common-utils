@@ -1,6 +1,6 @@
 import { createHash } from "crypto";
 import { StandardTracer } from "@devopsplaybook.io/otel-utils";
-import { Span } from "@opentelemetry/sdk-trace-base";
+import type { Span } from "@opentelemetry/sdk-trace";
 import * as jwt from "jsonwebtoken";
 import { v4 as uuidv4 } from "uuid";
 import { DbUtilsExecSQL, DbUtilsQuerySQL, DbUtilsWithLock } from "../DbUtils";

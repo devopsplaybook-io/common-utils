@@ -1,6 +1,6 @@
 import { Pool, PoolClient, PoolConfig } from "pg";
 import * as fs from "fs-extra";
-import { Span } from "@opentelemetry/sdk-trace-base";
+import type { Span } from "@opentelemetry/sdk-trace";
 import { SpanStatusCode } from "@opentelemetry/api";
 import {
   StandardTracer,
