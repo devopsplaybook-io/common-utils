@@ -13,6 +13,7 @@ export * from "./src/users/User";
 export * from "./src/users/UserSession";
 export * from "./src/users/UserApiToken";
 export * from "./src/users/Auth";
+export * from "./src/users/AuthAudit";
 export * from "./src/users/UserPassword";
 export * from "./src/users/UsersData";
 export * from "./src/users/UsersApiTokensData";

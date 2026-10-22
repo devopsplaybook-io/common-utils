@@ -11,6 +11,7 @@ import Fastify, { FastifyInstance } from "fastify";
 import { StandardLogger, StandardTracer } from "@devopsplaybook.io/otel-utils";
 import { DbUtilsExecSQL, DbUtilsGetDatabase, DbUtilsInit, DbUtilsQuerySQL, DbUtilsSetOTel } from "../DbUtils";
 import { AuthGetUserSession, AuthInit, AuthSetOTel } from "./Auth";
+import { AuthAuditEvent, AuthSetAuditHandler } from "./AuthAudit";
 import { UsersDataGetByName, UsersDataSetOTel } from "./UsersData";
 import { UsersApiTokensDataSetOTel } from "./UsersApiTokensData";
 import { UsersRoutes } from "./UsersRoutes";
@@ -131,6 +132,7 @@ function closeCurrentDb(): void {
 }
 
 beforeEach(async () => {
+  AuthSetAuditHandler(undefined);
   baseDir = nodeFs.mkdtempSync(path.join(os.tmpdir(), "users-routes-"));
   dataDir = path.join(baseDir, "data");
   sqlDir = path.join(baseDir, "sql");
@@ -884,5 +886,172 @@ describe("UsersRoutes: bootstrap and deletion races", () => {
       [userId],
     );
     expect(Number(rows[0].count)).toBe(0);
+  });
+});
+
+describe("UsersRoutes: audit events", () => {
+  it("emits login success and failure without credentials", async () => {
+    const events: AuthAuditEvent[] = [];
+    AuthSetAuditHandler((event) => events.push(event));
+
+    const adminToken = await bootstrapAdmin("audit-admin", "audit-pass");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        action: "user_create",
+        outcome: "success",
+        reason: "bootstrap",
+        targetUserName: "audit-admin",
+      }),
+    );
+    events.length = 0;
+
+    await login("audit-admin", "audit-pass");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        action: "login_success",
+        outcome: "success",
+        actorName: "audit-admin",
+      }),
+    );
+
+    const failed = await app.inject({
+      method: "POST",
+      url: "/api/users/session",
+      payload: { name: "audit-admin", password: "wrong-pass" },
+    });
+    expect(failed.statusCode).toBe(401);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        action: "login_failure",
+        outcome: "failure",
+        reason: "invalid_credentials",
+        targetUserName: "audit-admin",
+      }),
+    );
+
+    const unknown = await app.inject({
+      method: "POST",
+      url: "/api/users/session",
+      payload: { name: "no-such-user", password: "whatever" },
+    });
+    expect(unknown.statusCode).toBe(401);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        action: "login_failure",
+        targetUserName: "no-such-user",
+      }),
+    );
+
+    const serialized = JSON.stringify(events);
+    expect(serialized).not.toContain("audit-pass");
+    expect(serialized).not.toContain("wrong-pass");
+    expect(serialized).not.toContain(adminToken);
+  });
+
+  it("emits user, password and token events without secrets", async () => {
+    const events: AuthAuditEvent[] = [];
+    AuthSetAuditHandler((event) => events.push(event));
+
+    const adminToken = await bootstrapAdmin("audit-admin", "audit-pass");
+    const userId = await createUserViaAdmin(
+      adminToken,
+      "audit-user",
+      "user-pass",
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        action: "user_create",
+        actorName: "audit-admin",
+        targetUserId: userId,
+        targetUserName: "audit-user",
+      }),
+    );
+
+    const userToken = await login("audit-user", "user-pass");
+
+    const changed = await app.inject({
+      method: "PUT",
+      url: "/api/users/password",
+      payload: { password: "new-user-pass", passwordOld: "user-pass" },
+      headers: auth(userToken),
+    });
+    expect(changed.statusCode).toBe(201);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        action: "password_change",
+        reason: "self",
+        actorId: userId,
+        targetUserId: userId,
+      }),
+    );
+
+    const updated = await app.inject({
+      method: "PUT",
+      url: `/api/users/${userId}`,
+      payload: { role: "admin" },
+      headers: auth(adminToken),
+    });
+    expect(updated.statusCode).toBe(201);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        action: "user_update",
+        actorName: "audit-admin",
+        targetUserId: userId,
+        fields: ["role"],
+      }),
+    );
+
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api/users/tokens",
+      payload: { name: "audit-token" },
+      headers: auth(userToken),
+    });
+    expect(createdToken.statusCode).toBe(201);
+    const tokenId = createdToken.json().id as string;
+    const plaintextToken = createdToken.json().token as string;
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        action: "api_token_create",
+        actorId: userId,
+        tokenId,
+      }),
+    );
+
+    const revoked = await app.inject({
+      method: "DELETE",
+      url: `/api/users/tokens/${tokenId}`,
+      headers: auth(userToken),
+    });
+    expect(revoked.statusCode).toBe(200);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        action: "api_token_revoke",
+        actorId: userId,
+        targetUserId: userId,
+        tokenId,
+      }),
+    );
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/api/users/${userId}`,
+      headers: auth(adminToken),
+    });
+    expect(deleted.statusCode).toBe(200);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        action: "user_delete",
+        actorName: "audit-admin",
+        targetUserId: userId,
+        targetUserName: "audit-user",
+      }),
+    );
+
+    const serialized = JSON.stringify(events);
+    expect(serialized).not.toContain("user-pass");
+    expect(serialized).not.toContain("new-user-pass");
+    expect(serialized).not.toContain(plaintextToken);
+    expect(serialized).not.toContain(adminToken);
   });
 });

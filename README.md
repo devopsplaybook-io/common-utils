@@ -130,6 +130,8 @@ await config.reload();
 | `AUTH_RATE_LIMIT_LOGIN_MAX`                       | `10` (`<= 0` disables)               | No                                  |
 | `AUTH_RATE_LIMIT_REFRESH_MAX`                     | `60` (`<= 0` disables)               | No                                  |
 | `AUTH_RATE_LIMIT_WINDOW_SECONDS`                  | `60`                                 | No                                  |
+| `PASSWORD_MIN_LENGTH`                             | `0` (non-empty only)                 | No                                  |
+| `API_TOKENS_REVOKE_ON_PASSWORD_CHANGE`            | `false`                              | No                                  |
 | `CORS_POLICY_ORIGIN`                              | `""`                                 | No                                  |
 | `DATA_DIR`                                        | `/data`                              | No                                  |
 | `JWT_KEY`                                         | `""` (DB-managed, see `AuthInit`)    | Yes                                 |
@@ -142,6 +144,9 @@ await config.reload();
 | `DATABASE_POSTGRES_DATABASE`                      | `""`                                 | No                                  |
 | `DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS`          | `0` (disabled)                       | No                                  |
 | `DATABASE_POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS` | `0` (disabled)                      | No                                  |
+| `DATABASE_SQLITE_JOURNAL_MODE`                    | `""` (SQLite default)                | No                                  |
+| `DATABASE_SQLITE_BUSY_TIMEOUT_MS`                 | `0` (driver default)                 | No                                  |
+| `DATABASE_SQLITE_FOREIGN_KEYS`                    | `true`                               | No                                  |
 | All `OPENTELEMETRY_COLLECTOR_*` fields            | Various                              | No (except `_AUTHORIZATION_HEADER`) |
 
 `VERSION` is detected from the library's own `package.json` (correct also for the published layout, read once per process) and can be overridden like any other field via the `VERSION` environment variable or the config file. `SERVICE_ID` can be overridden the same way. Values loaded from the environment or the config file are coerced to the type of the default value (numbers, booleans, arrays), so `"DATABASE_POSTGRES_PORT": "5433"` in `config.json` is applied as the number `5433`. Boolean strings are case-insensitive (`true/false`, `1/0`, `yes/no`); an invalid number, boolean or JSON value rejects `reload()` with an explicit error instead of silently keeping a string or disabling a feature. Re-registering an existing field through `addConfigField` merges aliases and never drops its `sensitive` flag. A config file that exists but cannot be read or parsed is logged (a missing file is normal and stays silent). An unsupported `DATABASE_TYPE` makes `DbUtilsInit` reject with an explicit error.
@@ -463,10 +468,13 @@ fastify.register(new UsersRoutes().getRoutes, { prefix: "/api/users" });
 | `AUTH_ERROR_CODE_UNAUTHENTICATED` / `AUTH_ERROR_CODE_FORBIDDEN` / `AUTH_ERROR_CODE_INVALID_CREDENTIALS` | Stable machine-readable codes (`"UNAUTHENTICATED"`, `"FORBIDDEN"`, `"INVALID_CREDENTIALS"`) |
 | `AuthJwtRevocationEnabled` / `AuthGetApiTokensMaxPerUser` | Current `JWT_REVOCATION_ENABLED` / `API_TOKENS_MAX_PER_USER` values |
 | `AuthGetRateLimitLoginMax` / `AuthGetRateLimitRefreshMax` / `AuthGetRateLimitWindowSeconds` | Current `AUTH_RATE_LIMIT_*` values (defaults 10 / 60 / 60) |
+| `AuthSetAuditHandler` / `AuthAuditEmit` / `AuthAuditEvent` | Structured audit events (see **Audit events** below) |
 | `User`, `UserRole`, `UserScope` | User model; scopes are application-defined strings. `User.fromJson(payload)` returns `null` when the payload is missing **or has no `id`** — it never fabricates a fresh identity for an unidentified payload |
 | `UserSession`                | Decoded session: `isAuthenticated`, `userId`, `userName`, `role`, `scopes` |
 | `UserApiToken`               | API token model (only the SHA-256 hash is persisted)                   |
-| `UserPasswordSetPassword` / `UserPasswordCheckPassword` | bcrypt hashing and verification             |
+| `UserPasswordSetPolicy` / `UserPasswordGetMinLength` | Install a password policy (minimum length and optional custom validator) |
+| `UserPasswordValidate`       | Returns an error message when a password violates the policy/72-byte bcrypt limit, otherwise `null` |
+| `UserPasswordSetPassword` / `UserPasswordCheckPassword` / `UserPasswordCheckPasswordDummy` | bcrypt hashing, verification and the timing-equalizing dummy compare |
 | `UsersDataSetOTel`           | Injects the OTel tracer used by the users data module                  |
 | `UsersData*`                 | Users table CRUD (`Get`, `GetByName`, `List`, `Count`, `CountAdmins`, `Add`, `UpdateUser`, `UpdatePassword`, `Delete`, `BumpTokenVersion`) |
 | `isUniqueViolationError`     | Detects unique-constraint violations (SQLite/Postgres)                 |
@@ -481,6 +489,12 @@ fastify.register(new UsersRoutes().getRoutes, { prefix: "/api/users" });
 **JWT key precedence and rotation**: precedence is non-empty environment/config `JWT_KEY` > `metadata.auth_token` > generated and persisted value. `AuthInit` never reads or writes the database when a non-empty key is configured, and never logs the key. Changing the configured key (or the stored metadata value) invalidates every previously issued session; to keep a DB-managed key after removing a configured value, update `metadata` (`UPDATE metadata SET value='<new>' WHERE "type"='auth_token'`). With `JWT_REVOCATION_ENABLED=true` (default `false`), every JWT request re-reads the user and rejects tokens whose `tokenVersion` claim is stale; password changes, role/scope changes and deletion therefore invalidate previously issued JWTs. This requires the `users.tokenVersion` column.
 
 **Rate limiting**: `POST /session` is limited per IP + lowercased username (default 10 per 60 s) and `POST /session/refresh` per IP (default 60 per 60 s); configure with `AUTH_RATE_LIMIT_LOGIN_MAX`, `AUTH_RATE_LIMIT_REFRESH_MAX` and `AUTH_RATE_LIMIT_WINDOW_SECONDS`. A value `<= 0` disables the limiter for that route. Exceeding a limit answers **429** with `{ error: "Too Many Requests", code: "RATE_LIMITED", ... }` and a `Retry-After` header. The limiter is registered lazily by `UsersRoutes` (`@fastify/rate-limit`, `hook: "preHandler"` so the login body is parsed before keying). Behind a trusted reverse proxy, enable Fastify's `trustProxy` so the client IP is used instead of the proxy's; otherwise proxy-level limits are recommended.
+
+**Password policy**: passwords must be non-empty and at most 72 bytes — bcrypt silently truncates longer input, which would make two long passwords sharing the first 72 bytes interchangeable. `AuthInit` installs `PASSWORD_MIN_LENGTH` (default `0`) through `UserPasswordSetPolicy`; applications may call it again with a custom `validator` for complexity rules. `UserPasswordValidate` returns the same message the routes send in a 400, and `UserPasswordSetPassword` refuses to hash an invalid password.
+
+**Audit events**: `AuthSetAuditHandler(handler)` installs a callback that receives structured events for `login_success`, `login_failure`, `user_create`, `user_update`, `user_delete`, `password_change`, `api_token_create` and `api_token_revoke`; each event carries `outcome`, an ISO `timestamp`, actor/target ids and names, changed field names, token id and request IP where applicable. Events never contain passwords, password hashes, JWTs or API-token values/hashes. A throwing handler is swallowed so auditing can never fail a request, and without a handler events are dropped.
+
+**Token invalidation on password change**: with `API_TOKENS_REVOKE_ON_PASSWORD_CHANGE=true` (default `false`) `PUT /password` and an admin password reset delete every API token owned by the user. With `JWT_REVOCATION_ENABLED=true` the same routes also bump `tokenVersion`, invalidating issued JWTs. Enabling JWT revocation by default is planned for a future major release: it requires the `users.tokenVersion` column and one extra user read per request, so it stays opt-in here.
 
 **Response caching**: the credential responses (`POST /session`, `POST /session/refresh`, `POST /tokens`) send `Cache-Control: no-store`, `Pragma: no-cache` and `Vary: Authorization`.
 

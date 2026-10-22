@@ -18,6 +18,7 @@ import {
   AuthMustBeAdmin,
 } from "./Auth";
 import { DbUtilsWithLock } from "../DbUtils";
+import { AuthAuditEmit } from "./AuthAudit";
 import { User } from "./User";
 import { UserApiToken } from "./UserApiToken";
 import {
@@ -229,6 +230,14 @@ export class UsersRoutes {
             return sendUnauthenticated(res);
           }
           setNoStoreHeaders(res);
+          AuthAuditEmit({
+            action: "login_success",
+            outcome: "success",
+            reason: "existing_session",
+            actorId: user.id,
+            actorName: user.name,
+            ip: req.ip,
+          });
           return res.status(201).send({
             success: true,
             token: await AuthGenerateJWT(user),
@@ -249,6 +258,13 @@ export class UsersRoutes {
           // Compare against a dummy hash so an unknown user costs the same as
           // a wrong password (no account enumeration through response time).
           await UserPasswordCheckPasswordDummy(body.password);
+          AuthAuditEmit({
+            action: "login_failure",
+            outcome: "failure",
+            reason: "invalid_credentials",
+            targetUserName: body.name as string,
+            ip: req.ip,
+          });
           return res.status(401).send({
             error: "Authentication Failed",
             code: AUTH_ERROR_CODE_INVALID_CREDENTIALS,
@@ -261,12 +277,27 @@ export class UsersRoutes {
           )
         ) {
           setNoStoreHeaders(res);
+          AuthAuditEmit({
+            action: "login_success",
+            outcome: "success",
+            actorId: user.id,
+            actorName: user.name,
+            ip: req.ip,
+          });
           return res.status(201).send({
             success: true,
             token: await AuthGenerateJWT(user),
             user: user.toTransportJson(),
           });
         } else {
+          AuthAuditEmit({
+            action: "login_failure",
+            outcome: "failure",
+            reason: "invalid_credentials",
+            targetUserId: user.id,
+            targetUserName: user.name,
+            ip: req.ip,
+          });
           return res.status(401).send({
             error: "Authentication Failed",
             code: AUTH_ERROR_CODE_INVALID_CREDENTIALS,
@@ -383,6 +414,17 @@ export class UsersRoutes {
           }
           throw error;
         }
+        const actor = isFirstUser ? null : await AuthGetLiveUser(req);
+        AuthAuditEmit({
+          action: "user_create",
+          outcome: "success",
+          reason: isFirstUser ? "bootstrap" : undefined,
+          actorId: actor?.id,
+          actorName: actor?.name,
+          targetUserId: newUser.id,
+          targetUserName: newUser.name,
+          ip: req.ip,
+        });
         return res.status(201).send({ user: newUser.toTransportJson() });
       };
 
@@ -468,6 +510,16 @@ export class UsersRoutes {
       if (AuthGetApiTokensRevokeOnPasswordChange()) {
         await UsersApiTokensDataDeleteByUser(context, user.id);
       }
+      AuthAuditEmit({
+        action: "password_change",
+        outcome: "success",
+        reason: "self",
+        actorId: user.id,
+        actorName: user.name,
+        targetUserId: user.id,
+        targetUserName: user.name,
+        ip: req.ip,
+      });
       return res.status(201).send({});
     });
 
@@ -491,6 +543,7 @@ export class UsersRoutes {
       } catch {
         return;
       }
+      const actor = await AuthGetLiveUser(req);
 
       // A body expecting nothing to change is malformed: answer 400, not 404/201
       if (
@@ -613,6 +666,34 @@ export class UsersRoutes {
         await UsersApiTokensDataDeleteByUser(context, user.id);
       }
 
+      if (changed) {
+        const fields = ["role", "scopes", "password"].filter(
+          (field) => body[field] !== undefined,
+        );
+        AuthAuditEmit({
+          action: "user_update",
+          outcome: "success",
+          actorId: actor?.id,
+          actorName: actor?.name,
+          targetUserId: user.id,
+          targetUserName: user.name,
+          fields,
+          ip: req.ip,
+        });
+        if (typeof body.password === "string") {
+          AuthAuditEmit({
+            action: "password_change",
+            outcome: "success",
+            reason: "admin_reset",
+            actorId: actor?.id,
+            actorName: actor?.name,
+            targetUserId: user.id,
+            targetUserName: user.name,
+            ip: req.ip,
+          });
+        }
+      }
+
       return res.status(201).send({ user: user.toTransportJson() });
     });
 
@@ -659,6 +740,15 @@ export class UsersRoutes {
         }
         return res.status(404).send({ error: "User Not Found" });
       }
+      AuthAuditEmit({
+        action: "user_delete",
+        outcome: "success",
+        actorId: currentUser?.id,
+        actorName: currentUser?.name,
+        targetUserId: user.id,
+        targetUserName: user.name,
+        ip: req.ip,
+      });
       return res.status(200).send({});
     });
 
@@ -732,6 +822,16 @@ export class UsersRoutes {
           .status(400)
           .send({ error: `Too many API tokens (max ${maxTokens})` });
       }
+      AuthAuditEmit({
+        action: "api_token_create",
+        outcome: "success",
+        actorId: user.id,
+        actorName: user.name,
+        targetUserId: user.id,
+        targetUserName: user.name,
+        tokenId: apiToken.id,
+        ip: req.ip,
+      });
       setNoStoreHeaders(res);
       // The plaintext token is returned once; only its hash is stored.
       return res.status(201).send({
@@ -774,6 +874,15 @@ export class UsersRoutes {
           .send({ error: "Access Denied", code: AUTH_ERROR_CODE_FORBIDDEN });
       }
       await UsersApiTokensDataDelete(context, apiToken.id);
+      AuthAuditEmit({
+        action: "api_token_revoke",
+        outcome: "success",
+        actorId: user.id,
+        actorName: user.name,
+        targetUserId: apiToken.userId,
+        tokenId: apiToken.id,
+        ip: req.ip,
+      });
       return res.status(200).send({});
     });
   }
