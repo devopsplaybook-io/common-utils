@@ -1,5 +1,5 @@
 import { StandardTracer } from "@devopsplaybook.io/otel-utils";
-import { Span } from "@opentelemetry/sdk-trace-base";
+import type { Span } from "@opentelemetry/sdk-trace";
 import { DbUtilsExecSQL, DbUtilsQuerySQL } from "../DbUtils";
 import { User } from "./User";
 

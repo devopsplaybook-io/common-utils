@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import * as fs from "fs-extra";
-import { Span } from "@opentelemetry/sdk-trace-base";
+import type { Span } from "@opentelemetry/sdk-trace";
 import { SpanStatusCode } from "@opentelemetry/api";
 import {
   StandardTracer,

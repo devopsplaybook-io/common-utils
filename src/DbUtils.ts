@@ -1,4 +1,4 @@
-import { Span } from "@opentelemetry/sdk-trace-base";
+import type { Span } from "@opentelemetry/sdk-trace";
 import { StandardTracer, StandardLogger } from "@devopsplaybook.io/otel-utils";
 import * as SqlDbUtils from "./SqlDbUtils";
 import * as PostgresDbUtils from "./PostgresDbUtils";

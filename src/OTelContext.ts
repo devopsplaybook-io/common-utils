@@ -4,7 +4,7 @@ import {
   StandardTracer,
 } from "@devopsplaybook.io/otel-utils";
 import { OTelRequestSpan as OTelRequestSpanFromLibrary } from "@devopsplaybook.io/otel-utils-fastify";
-import { Span } from "@opentelemetry/sdk-trace-base";
+import type { Span } from "@opentelemetry/sdk-trace";
 
 /**
  * Result of {@link createOTelContext}.
