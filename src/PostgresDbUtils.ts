@@ -30,17 +30,45 @@ export interface PostgresDbConfig {
 }
 
 /**
- * Named advisory-lock purposes. Each name maps to a fixed 32-bit key (the
- * first four ASCII characters of the purpose) so that every replica of every
- * service booting against the same database serialises the same operation.
+ * Named advisory-lock purposes. The three historical names keep a fixed
+ * 32-bit key (the first four ASCII characters of the purpose) so that every
+ * replica of every service booting against the same database serialises the
+ * same operation; any other name is accepted and hashed deterministically.
  */
-export type PostgresLockName = "migration" | "auth_token" | "users_bootstrap";
+export type PostgresLockName =
+  | "migration"
+  | "auth_token"
+  | "users_bootstrap"
+  | (string & {});
 
-export const POSTGRES_LOCK_KEYS: Record<PostgresLockName, number> = {
+export const POSTGRES_LOCK_KEYS: Record<string, number> = {
   migration: 0x6d696772, // "migr"
   auth_token: 0x61757468, // "auth"
   users_bootstrap: 0x75736572, // "user"
 };
+
+/**
+ * 32-bit FNV-1a hash, stable across processes, replicas and restarts.
+ * Returns an unsigned 32-bit integer.
+ */
+function fnv1a32(value: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+/**
+ * Resolve the Postgres advisory-lock key of a purpose name. The three
+ * historical names keep their exact keys; every other name is mapped through
+ * the deterministic {@link fnv1a32} hash so all replicas agree on it.
+ */
+export function PostgresAdvisoryLockKey(lock: PostgresLockName): number {
+  const knownKey = POSTGRES_LOCK_KEYS[lock];
+  return knownKey !== undefined ? knownKey : fnv1a32(lock);
+}
 
 // ---------------------------------------------------------------------------
 // Module-level state
@@ -635,7 +663,7 @@ export async function PostgresDbUtilsWithAdvisoryLock<T>(
   try {
     return await withAdvisoryLockOnClient(
       client,
-      POSTGRES_LOCK_KEYS[lock],
+      PostgresAdvisoryLockKey(lock),
       callback,
       context,
     );

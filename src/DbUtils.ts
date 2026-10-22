@@ -14,10 +14,11 @@ export interface DbUtilsConfig
 
 /**
  * Advisory-lock purposes used by the facade. SQLite has a single writer and
- * runs the callback directly; Postgres serialises concurrently booting
- * replicas on the named lock.
+ * runs the callback directly; Postgres serialises concurrent callers and
+ * replicas on the named lock. Any name is accepted: the Postgres backend
+ * derives a deterministic key for names outside the historical set.
  */
-export type DbUtilsLockName = "auth_token" | "users_bootstrap";
+export type DbUtilsLockName = "auth_token" | "users_bootstrap" | (string & {});
 
 let databaseType: "sqlite" | "postgres" = "sqlite";
 
