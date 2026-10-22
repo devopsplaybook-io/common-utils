@@ -8,6 +8,7 @@ import {
   AUTH_ERROR_CODE_UNAUTHENTICATED,
   AuthGenerateJWT,
   AuthGetApiTokensMaxPerUser,
+  AuthGetApiTokensRevokeOnPasswordChange,
   AuthGetLiveUser,
   AuthGetRateLimitLoginMax,
   AuthGetRateLimitRefreshMax,
@@ -21,14 +22,25 @@ import { User } from "./User";
 import { UserApiToken } from "./UserApiToken";
 import {
   UserPasswordCheckPassword,
+  UserPasswordCheckPasswordDummy,
   UserPasswordSetPassword,
+  UserPasswordValidate,
 } from "./UserPassword";
 import {
+  UsersApiTokensDataAddIfBelowCap,
+  UsersApiTokensDataDelete,
+  UsersApiTokensDataDeleteByUser,
+  UsersApiTokensDataGet,
+  UsersApiTokensDataListByUser,
+  UsersApiTokensDataSupportsOptionalColumns,
+} from "./UsersApiTokensData";
+import {
   UsersDataAdd,
+  UsersDataAddIfEmpty,
   UsersDataBumpTokenVersion,
   UsersDataCount,
-  UsersDataCountAdmins,
-  UsersDataDelete,
+  UsersDataDeleteWithTokens,
+  UsersDataDemoteAdminIfNotLast,
   UsersDataGet,
   UsersDataGetByName,
   UsersDataList,
@@ -36,18 +48,76 @@ import {
   UsersDataUpdateUser,
   isUniqueViolationError,
 } from "./UsersData";
-import {
-  UsersApiTokensDataAdd,
-  UsersApiTokensDataCountByUser,
-  UsersApiTokensDataDelete,
-  UsersApiTokensDataDeleteByUser,
-  UsersApiTokensDataGet,
-  UsersApiTokensDataListByUser,
-  UsersApiTokensDataSupportsOptionalColumns,
-} from "./UsersApiTokensData";
 
 /** Maximum accepted API token name length. */
 const API_TOKEN_NAME_MAX_LENGTH = 255;
+/** Default page size of `GET /` and the largest accepted `limit`. */
+const USERS_LIST_DEFAULT_LIMIT = 100;
+const USERS_LIST_MAX_LIMIT = 1000;
+
+function isMissing(value: unknown): boolean {
+  return value === undefined || value === null || value === "";
+}
+
+/** Validate a `{ name, password }` body; returns an error message or `null`. */
+function validateCredentialsBody(body: Record<string, unknown>): string | null {
+  if (isMissing(body.name)) {
+    return "Missing: Name";
+  }
+  if (typeof body.name !== "string") {
+    return "Invalid: Name";
+  }
+  if (isMissing(body.password)) {
+    return "Missing: Password";
+  }
+  if (typeof body.password !== "string") {
+    return "Invalid: Password";
+  }
+  return null;
+}
+
+/** Validate the user-creation body; returns an error message or `null`. */
+function validateCreateBody(body: Record<string, unknown>): string | null {
+  const credentialsError = validateCredentialsBody(body);
+  if (credentialsError) {
+    return credentialsError;
+  }
+  if (
+    body.role !== undefined &&
+    body.role !== "admin" &&
+    body.role !== "user"
+  ) {
+    return "Invalid: role";
+  }
+  if (body.scopes !== undefined) {
+    if (
+      !Array.isArray(body.scopes) ||
+      body.scopes.some((scope) => typeof scope !== "string")
+    ) {
+      return "Invalid: scopes";
+    }
+  }
+  return null;
+}
+
+/** Build a user from an already validated body. */
+function buildNewUser(body: Record<string, unknown>, isFirstUser: boolean): User {
+  const newUser = new User();
+  newUser.name = body.name as string;
+  if (isFirstUser) {
+    // First user is always admin
+    newUser.role = "admin";
+    newUser.scopes = [...User.ALL_SCOPES];
+  } else {
+    newUser.role = body.role === "admin" ? "admin" : "user";
+    if (Array.isArray(body.scopes)) {
+      newUser.scopes = (body.scopes as string[]).filter((scope) =>
+        User.ALL_SCOPES.includes(scope),
+      );
+    }
+  }
+  return newUser;
+}
 
 /** Parse an optional non-negative integer query parameter. */
 function parseNonNegativeInt(value: unknown): number | undefined {
@@ -145,7 +215,7 @@ export class UsersRoutes {
           }
         : {},
       async (req, res) => {
-        const body = req.body ?? {};
+        const body = (req.body ?? {}) as Record<string, unknown>;
         let user: User | null;
         // From token
         const userSession = await AuthGetUserSession(req);
@@ -167,14 +237,18 @@ export class UsersRoutes {
         }
 
         // From User/Pass
-        if (!body.name) {
-          return res.status(400).send({ error: "Missing: Name" });
+        const validationError = validateCredentialsBody(body);
+        if (validationError) {
+          return res.status(400).send({ error: validationError });
         }
-        if (!body.password) {
-          return res.status(400).send({ error: "Missing: Password" });
-        }
-        user = await UsersDataGetByName(OTelRequestSpan(req), body.name);
+        user = await UsersDataGetByName(
+          OTelRequestSpan(req),
+          body.name as string,
+        );
         if (!user) {
+          // Compare against a dummy hash so an unknown user costs the same as
+          // a wrong password (no account enumeration through response time).
+          await UserPasswordCheckPasswordDummy(body.password);
           return res.status(401).send({
             error: "Authentication Failed",
             code: AUTH_ERROR_CODE_INVALID_CREDENTIALS,
@@ -183,7 +257,7 @@ export class UsersRoutes {
           await UserPasswordCheckPassword(
             OTelRequestSpan(req),
             user,
-            body.password,
+            body.password as string,
           )
         ) {
           setNoStoreHeaders(res);
@@ -245,7 +319,19 @@ export class UsersRoutes {
       if (query.offset !== undefined && offset === undefined) {
         return res.status(400).send({ error: "Invalid: offset" });
       }
-      const users = await UsersDataList(OTelRequestSpan(req), limit, offset);
+      if (offset !== undefined && limit === undefined) {
+        return res.status(400).send({ error: "Invalid: offset (limit required)" });
+      }
+      if (limit !== undefined && limit > USERS_LIST_MAX_LIMIT) {
+        return res
+          .status(400)
+          .send({ error: `Invalid: limit (maximum ${USERS_LIST_MAX_LIMIT})` });
+      }
+      const users = await UsersDataList(
+        OTelRequestSpan(req),
+        limit ?? USERS_LIST_DEFAULT_LIMIT,
+        offset,
+      );
       return res.status(200).send(users.map((u) => u.toTransportJson()));
     });
 
@@ -261,36 +347,34 @@ export class UsersRoutes {
     }
     fastify.post<PostUser>("/", async (req, res) => {
       const context = OTelRequestSpan(req);
-      const body = req.body ?? {};
+      const body = (req.body ?? {}) as Record<string, unknown>;
 
       const createUser = async (isFirstUser: boolean) => {
-        if (!body.name) {
-          return res.status(400).send({ error: "Missing: Name" });
+        const validationError = validateCreateBody(body);
+        if (validationError) {
+          return res.status(400).send({ error: validationError });
         }
-        if (!body.password) {
-          return res.status(400).send({ error: "Missing: Password" });
+        const passwordError = UserPasswordValidate(body.password);
+        if (passwordError) {
+          return res.status(400).send({ error: passwordError });
         }
-        if (await UsersDataGetByName(context, body.name)) {
+        if (await UsersDataGetByName(context, body.name as string)) {
           return res.status(400).send({ error: "Username Already Exists" });
         }
 
-        const newUser = new User();
-        newUser.name = body.name;
-        // First user is always admin
-        if (isFirstUser) {
-          newUser.role = "admin";
-          newUser.scopes = [...User.ALL_SCOPES];
-        } else {
-          newUser.role = body.role === "admin" ? "admin" : "user";
-          if (body.scopes && Array.isArray(body.scopes)) {
-            newUser.scopes = body.scopes.filter((s) =>
-              User.ALL_SCOPES.includes(s),
-            );
-          }
-        }
-        await UserPasswordSetPassword(context, newUser, body.password);
+        const newUser = buildNewUser(body, isFirstUser);
+        await UserPasswordSetPassword(context, newUser, body.password as string);
         try {
-          await UsersDataAdd(context, newUser);
+          if (isFirstUser) {
+            // The emptiness check is part of the INSERT: when another request
+            // bootstrapped first, this inserts nothing and the caller falls
+            // back to the admin-authenticated path.
+            if (!(await UsersDataAddIfEmpty(context, newUser))) {
+              return null;
+            }
+          } else {
+            await UsersDataAdd(context, newUser);
+          }
         } catch (error) {
           // Uniqueness also holds when the pre-check races another request
           // (unique index on LOWER("name") – see README migration).
@@ -318,7 +402,10 @@ export class UsersRoutes {
         "users_bootstrap",
         async () => {
           if ((await UsersDataCount(context)) === 0) {
-            return createUser(true);
+            const firstUserResult = await createUser(true);
+            if (firstUserResult !== null) {
+              return firstUserResult;
+            }
           }
           // Another replica bootstrapped first: require admin credentials.
           try {
@@ -342,13 +429,26 @@ export class UsersRoutes {
     }
     fastify.put<PutOwnPassword>("/password", async (req, res) => {
       const context = OTelRequestSpan(req);
-      const body = req.body ?? {};
+      const body = (req.body ?? {}) as Record<string, unknown>;
       const user = await AuthGetLiveUser(req);
       if (!user) {
         return sendUnauthenticated(res);
       }
-      if (!body.password) {
+      if (isMissing(body.password)) {
         return res.status(400).send({ error: "Missing: Password" });
+      }
+      if (typeof body.password !== "string") {
+        return res.status(400).send({ error: "Invalid: Password" });
+      }
+      if (isMissing(body.passwordOld)) {
+        return res.status(400).send({ error: "Missing: PasswordOld" });
+      }
+      if (typeof body.passwordOld !== "string") {
+        return res.status(400).send({ error: "Invalid: PasswordOld" });
+      }
+      const passwordError = UserPasswordValidate(body.password);
+      if (passwordError) {
+        return res.status(400).send({ error: passwordError });
       }
       if (
         !(await UserPasswordCheckPassword(context, user, body.passwordOld))
@@ -358,9 +458,15 @@ export class UsersRoutes {
           .send({ error: "Old Password Wrong", code: AUTH_ERROR_CODE_FORBIDDEN });
       }
       await UserPasswordSetPassword(context, user, body.password);
-      await UsersDataUpdatePassword(context, user);
+      const changed = await UsersDataUpdatePassword(context, user);
+      if (changed === 0) {
+        return res.status(404).send({ error: "User Not Found" });
+      }
       if (AuthJwtRevocationEnabled()) {
         await UsersDataBumpTokenVersion(context, user.id);
+      }
+      if (AuthGetApiTokensRevokeOnPasswordChange()) {
+        await UsersApiTokensDataDeleteByUser(context, user.id);
       }
       return res.status(201).send({});
     });
@@ -379,7 +485,7 @@ export class UsersRoutes {
     }
     fastify.put<PutUser>("/:id", async (req, res) => {
       const context = OTelRequestSpan(req);
-      const body = req.body ?? {};
+      const body = (req.body ?? {}) as Record<string, unknown>;
       try {
         await AuthMustBeAdmin(req, res);
       } catch {
@@ -394,6 +500,29 @@ export class UsersRoutes {
       ) {
         return res.status(400).send({ error: "Missing: Body" });
       }
+      if (
+        body.role !== undefined &&
+        body.role !== "admin" &&
+        body.role !== "user"
+      ) {
+        return res.status(400).send({ error: "Invalid: role" });
+      }
+      if (
+        body.scopes !== undefined &&
+        (!Array.isArray(body.scopes) ||
+          body.scopes.some((scope) => typeof scope !== "string"))
+      ) {
+        return res.status(400).send({ error: "Invalid: scopes" });
+      }
+      if (body.password !== undefined && typeof body.password !== "string") {
+        return res.status(400).send({ error: "Invalid: Password" });
+      }
+      if (typeof body.password === "string") {
+        const passwordError = UserPasswordValidate(body.password);
+        if (passwordError) {
+          return res.status(400).send({ error: passwordError });
+        }
+      }
 
       const user = await UsersDataGet(context, req.params.id);
       if (!user) {
@@ -401,46 +530,87 @@ export class UsersRoutes {
       }
 
       let changed = false;
-      if (body.role) {
-        const newRole = body.role === "admin" ? "admin" : "user";
-        if (newRole !== user.role) {
-          // At least 1 admin must remain (mirrors the delete guard)
-          if (
-            user.role === "admin" &&
-            newRole === "user" &&
-            (await UsersDataCountAdmins(context)) <= 1
-          ) {
-            return res
-              .status(400)
-              .send({ error: "At least 1 admin must be defined" });
-          }
-          user.role = newRole;
-          changed = true;
-        }
-      }
-      if (body.scopes && Array.isArray(body.scopes)) {
-        const newScopes = body.scopes.filter((s) =>
-          User.ALL_SCOPES.includes(s),
-        );
-        if (JSON.stringify(newScopes) !== JSON.stringify(user.scopes)) {
-          user.scopes = newScopes;
-          changed = true;
-        }
-      }
+      let lastAdminRefused = false;
+      let notFound = false;
 
-      if (changed) {
-        await UsersDataUpdateUser(context, user);
-      }
-
-      // If password change requested
-      if (body.password) {
+      if (typeof body.password === "string") {
         await UserPasswordSetPassword(context, user, body.password);
-        await UsersDataUpdatePassword(context, user);
-        changed = true;
+      }
+
+      await DbUtilsWithLock(
+        "users_admin_guard",
+        async () => {
+          const newRole =
+            body.role !== undefined
+              ? body.role === "admin"
+                ? "admin"
+                : "user"
+              : user.role;
+          const newScopes = Array.isArray(body.scopes)
+            ? (body.scopes as string[]).filter((scope) =>
+                User.ALL_SCOPES.includes(scope),
+              )
+            : user.scopes;
+          const roleChanged = newRole !== user.role;
+          const scopesChanged =
+            JSON.stringify(newScopes) !== JSON.stringify(user.scopes);
+
+          if (roleChanged && user.role === "admin" && newRole === "user") {
+            // Demotion guarded by a conditional UPDATE: concurrent demotions
+            // can never remove the last administrator.
+            const updates = await UsersDataDemoteAdminIfNotLast(
+              context,
+              user.id,
+              scopesChanged ? newScopes : user.scopes,
+            );
+            if (updates === 0) {
+              lastAdminRefused = true;
+              return;
+            }
+            user.role = "user";
+            user.scopes = newScopes;
+            changed = true;
+          } else if (roleChanged || scopesChanged) {
+            user.role = newRole;
+            user.scopes = newScopes;
+            const updates = await UsersDataUpdateUser(context, user);
+            if (updates === 0) {
+              notFound = true;
+              return;
+            }
+            changed = true;
+          }
+
+          // If password change requested
+          if (typeof body.password === "string") {
+            const updates = await UsersDataUpdatePassword(context, user);
+            if (updates === 0) {
+              notFound = true;
+              return;
+            }
+            changed = true;
+          }
+        },
+        context,
+      );
+
+      if (lastAdminRefused) {
+        return res
+          .status(400)
+          .send({ error: "At least 1 admin must be defined" });
+      }
+      if (notFound) {
+        return res.status(404).send({ error: "User Not Found" });
       }
 
       if (changed && AuthJwtRevocationEnabled()) {
         await UsersDataBumpTokenVersion(context, user.id);
+      }
+      if (
+        typeof body.password === "string" &&
+        AuthGetApiTokensRevokeOnPasswordChange()
+      ) {
+        await UsersApiTokensDataDeleteByUser(context, user.id);
       }
 
       return res.status(201).send({ user: user.toTransportJson() });
@@ -473,18 +643,22 @@ export class UsersRoutes {
         return res.status(404).send({ error: "User Not Found" });
       }
 
-      // Check that at least 1 admin remains
-      if (user.role === "admin") {
-        const admins = await UsersDataCountAdmins(context);
-        if (admins <= 1) {
+      // The last-admin guard and the token cleanup run in one transaction:
+      // a refusal leaves both tables untouched and a success leaves no
+      // orphaned credentials.
+      const deleted = await DbUtilsWithLock(
+        "users_admin_guard",
+        () => UsersDataDeleteWithTokens(context, req.params.id),
+        context,
+      );
+      if (!deleted) {
+        if (await UsersDataGet(context, req.params.id)) {
           return res
             .status(400)
             .send({ error: "At least 1 admin must be defined" });
         }
+        return res.status(404).send({ error: "User Not Found" });
       }
-
-      await UsersDataDelete(context, req.params.id);
-      await UsersApiTokensDataDeleteByUser(context, req.params.id);
       return res.status(200).send({});
     });
 
@@ -498,13 +672,16 @@ export class UsersRoutes {
     }
     fastify.post<PostApiToken>("/tokens", async (req, res) => {
       const context = OTelRequestSpan(req);
-      const body = req.body ?? {};
+      const body = (req.body ?? {}) as Record<string, unknown>;
       const user = await AuthGetLiveUser(req);
       if (!user) {
         return sendUnauthenticated(res);
       }
-      if (!body.name || typeof body.name !== "string") {
+      if (isMissing(body.name)) {
         return res.status(400).send({ error: "Missing: Name" });
+      }
+      if (typeof body.name !== "string") {
+        return res.status(400).send({ error: "Invalid: Name" });
       }
       if (body.name.length > API_TOKEN_NAME_MAX_LENGTH) {
         return res.status(400).send({
@@ -513,6 +690,11 @@ export class UsersRoutes {
       }
       let expiresAt: string | null = null;
       if (body.expiresAt !== undefined && body.expiresAt !== null) {
+        if (typeof body.expiresAt !== "string") {
+          return res
+            .status(400)
+            .send({ error: "Invalid: expiresAt (ISO 8601 date expected)" });
+        }
         const parsed = Date.parse(body.expiresAt);
         if (!Number.isFinite(parsed)) {
           return res
@@ -533,13 +715,6 @@ export class UsersRoutes {
         expiresAt = new Date(parsed).toISOString();
       }
       const maxTokens = AuthGetApiTokensMaxPerUser();
-      if (
-        (await UsersApiTokensDataCountByUser(context, user.id)) >= maxTokens
-      ) {
-        return res
-          .status(400)
-          .send({ error: `Too many API tokens (max ${maxTokens})` });
-      }
       const apiToken = new UserApiToken();
       apiToken.name = body.name;
       apiToken.userId = user.id;
@@ -547,7 +722,16 @@ export class UsersRoutes {
       apiToken.expiresAt = expiresAt;
       const token = randomBytes(32).toString("base64url");
       apiToken.tokenHash = createHash("sha256").update(token).digest("hex");
-      await UsersApiTokensDataAdd(context, apiToken);
+      const inserted = await DbUtilsWithLock(
+        `users_api_token_cap:${user.id}`,
+        () => UsersApiTokensDataAddIfBelowCap(context, apiToken, maxTokens),
+        context,
+      );
+      if (!inserted) {
+        return res
+          .status(400)
+          .send({ error: `Too many API tokens (max ${maxTokens})` });
+      }
       setNoStoreHeaders(res);
       // The plaintext token is returned once; only its hash is stored.
       return res.status(201).send({

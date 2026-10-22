@@ -9,7 +9,7 @@ import * as os from "os";
 import * as path from "path";
 import Fastify, { FastifyInstance } from "fastify";
 import { StandardLogger, StandardTracer } from "@devopsplaybook.io/otel-utils";
-import { DbUtilsExecSQL, DbUtilsGetDatabase, DbUtilsInit, DbUtilsSetOTel } from "../DbUtils";
+import { DbUtilsExecSQL, DbUtilsGetDatabase, DbUtilsInit, DbUtilsQuerySQL, DbUtilsSetOTel } from "../DbUtils";
 import { AuthGetUserSession, AuthInit, AuthSetOTel } from "./Auth";
 import { UsersDataGetByName, UsersDataSetOTel } from "./UsersData";
 import { UsersApiTokensDataSetOTel } from "./UsersApiTokensData";
@@ -699,5 +699,190 @@ describe("UsersRoutes: JWT revocation", () => {
       headers: auth(jwtToken),
     });
     expect(stillValid.statusCode).toBe(200);
+  });
+});
+
+describe("UsersRoutes: typed body validation", () => {
+  it("answers 400 on non-string credentials", async () => {
+    await bootstrapAdmin("root", "root-pass");
+
+    const numericPassword = await app.inject({
+      method: "POST",
+      url: "/api/users/session",
+      payload: { name: "root", password: 123 },
+    });
+    expect(numericPassword.statusCode).toBe(400);
+    expect(numericPassword.json().error).toBe("Invalid: Password");
+
+    const objectName = await app.inject({
+      method: "POST",
+      url: "/api/users/session",
+      payload: { name: { evil: true }, password: "root-pass" },
+    });
+    expect(objectName.statusCode).toBe(400);
+    expect(objectName.json().error).toBe("Invalid: Name");
+  });
+
+  it("answers 400 on a missing or non-string old password", async () => {
+    const token = await bootstrapAdmin("root", "root-pass");
+
+    const missingOld = await app.inject({
+      method: "PUT",
+      url: "/api/users/password",
+      payload: { password: "new-secret" },
+      headers: auth(token),
+    });
+    expect(missingOld.statusCode).toBe(400);
+    expect(missingOld.json().error).toBe("Missing: PasswordOld");
+
+    const invalidOld = await app.inject({
+      method: "PUT",
+      url: "/api/users/password",
+      payload: { password: "new-secret", passwordOld: 42 },
+      headers: auth(token),
+    });
+    expect(invalidOld.statusCode).toBe(400);
+    expect(invalidOld.json().error).toBe("Invalid: PasswordOld");
+  });
+
+  it("answers 400 on invalid create/update field types", async () => {
+    const token = await bootstrapAdmin("root", "root-pass");
+    const rootId = (await UsersDataGetByName(undefined, "root"))?.id as string;
+
+    const numericPassword = await app.inject({
+      method: "POST",
+      url: "/api/users/",
+      payload: { name: "someone", password: 123 },
+      headers: auth(token),
+    });
+    expect(numericPassword.statusCode).toBe(400);
+    expect(numericPassword.json().error).toBe("Invalid: Password");
+
+    const objectName = await app.inject({
+      method: "POST",
+      url: "/api/users/",
+      payload: { name: { evil: true }, password: "valid-pass" },
+      headers: auth(token),
+    });
+    expect(objectName.statusCode).toBe(400);
+    expect(objectName.json().error).toBe("Invalid: Name");
+
+    const invalidScopes = await app.inject({
+      method: "PUT",
+      url: `/api/users/${rootId}`,
+      payload: { scopes: "traces" },
+      headers: auth(token),
+    });
+    expect(invalidScopes.statusCode).toBe(400);
+    expect(invalidScopes.json().error).toBe("Invalid: scopes");
+
+    const invalidRole = await app.inject({
+      method: "PUT",
+      url: `/api/users/${rootId}`,
+      payload: { role: { evil: true } },
+      headers: auth(token),
+    });
+    expect(invalidRole.statusCode).toBe(400);
+    expect(invalidRole.json().error).toBe("Invalid: role");
+  });
+
+  it("rejects an over-long password instead of truncating it", async () => {
+    const token = await bootstrapAdmin("root", "root-pass");
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/users/",
+      payload: { name: "long-pass", password: "a".repeat(73) },
+      headers: auth(token),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toContain("Password Too Long");
+  });
+});
+
+describe("UsersRoutes: pagination contract", () => {
+  it("orders the list by name and rejects offset without limit", async () => {
+    const token = await bootstrapAdmin("root", "root-pass");
+    await createUserViaAdmin(token, "bob", "bob-pass");
+    await createUserViaAdmin(token, "alice", "alice-pass");
+
+    const list = await app.inject({
+      method: "GET",
+      url: "/api/users/",
+      headers: auth(token),
+    });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().map((u: { name: string }) => u.name)).toEqual([
+      "alice",
+      "bob",
+      "root",
+    ]);
+
+    const offsetOnly = await app.inject({
+      method: "GET",
+      url: "/api/users/?offset=1",
+      headers: auth(token),
+    });
+    expect(offsetOnly.statusCode).toBe(400);
+    expect(offsetOnly.json().error).toContain("limit");
+
+    const tooLarge = await app.inject({
+      method: "GET",
+      url: "/api/users/?limit=1001",
+      headers: auth(token),
+    });
+    expect(tooLarge.statusCode).toBe(400);
+  });
+});
+
+describe("UsersRoutes: bootstrap and deletion races", () => {
+  it("creates only one admin when two first-user requests race", async () => {
+    const [first, second] = await Promise.all([
+      app.inject({
+        method: "POST",
+        url: "/api/users/",
+        payload: { name: "first", password: "first-pass" },
+      }),
+      app.inject({
+        method: "POST",
+        url: "/api/users/",
+        payload: { name: "second", password: "second-pass" },
+      }),
+    ]);
+
+    const statuses = [first.statusCode, second.statusCode].sort();
+    expect(statuses).toEqual([201, 401]);
+  });
+
+  it("deletes the user's API tokens together with the user", async () => {
+    const adminToken = await bootstrapAdmin("root", "root-pass");
+    const userId = await createUserViaAdmin(
+      adminToken,
+      "doomed",
+      "doomed-pass",
+    );
+    const userToken = await login("doomed", "doomed-pass");
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/users/tokens",
+      payload: { name: "ci-token" },
+      headers: auth(userToken),
+    });
+    expect(created.statusCode).toBe(201);
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/api/users/${userId}`,
+      headers: auth(adminToken),
+    });
+    expect(deleted.statusCode).toBe(200);
+
+    const rows = await DbUtilsQuerySQL(
+      undefined,
+      'SELECT COUNT(*) as count FROM users_api_tokens WHERE "userId" = ?',
+      [userId],
+    );
+    expect(Number(rows[0].count)).toBe(0);
   });
 });

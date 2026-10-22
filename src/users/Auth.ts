@@ -5,6 +5,7 @@ import * as jwt from "jsonwebtoken";
 import { v4 as uuidv4 } from "uuid";
 import { DbUtilsExecSQL, DbUtilsQuerySQL, DbUtilsWithLock } from "../DbUtils";
 import { User, UserScope } from "./User";
+import { UserPasswordSetPolicy } from "./UserPassword";
 import { UserSession } from "./UserSession";
 import {
   UsersApiTokensDataGetByTokenHash,
@@ -29,6 +30,10 @@ export interface AuthConfig {
   AUTH_RATE_LIMIT_REFRESH_MAX?: number;
   /** Rate-limit window in seconds (defaults to 60). */
   AUTH_RATE_LIMIT_WINDOW_SECONDS?: number;
+  /** Minimum password length (defaults to 0: no minimum). */
+  PASSWORD_MIN_LENGTH?: number;
+  /** Revoke every API token when a password changes (defaults to false). */
+  API_TOKENS_REVOKE_ON_PASSWORD_CHANGE?: boolean;
 }
 
 /**
@@ -65,6 +70,19 @@ let tracer: StandardTracer;
 let config: AuthConfig;
 
 /**
+ * Extract the credential from an `Authorization` header. Only the `Bearer`
+ * scheme (case-insensitive, RFC 6750) is accepted: another scheme carrying a
+ * valid JWT must not authenticate a request.
+ */
+function extractBearerToken(authorization: unknown): string | null {
+  if (typeof authorization !== "string") {
+    return null;
+  }
+  const match = /^Bearer[ \t]+(\S+)$/i.exec(authorization.trim());
+  return match ? match[1] : null;
+}
+
+/**
  * Injects the OTel tracer instance used by the auth module.
  * Must be called once at startup, before {@link AuthInit}.
  */
@@ -99,6 +117,11 @@ export function AuthGetRateLimitWindowSeconds(): number {
   );
 }
 
+/** Whether API tokens are revoked when a password changes. */
+export function AuthGetApiTokensRevokeOnPasswordChange(): boolean {
+  return config?.API_TOKENS_REVOKE_ON_PASSWORD_CHANGE === true;
+}
+
 /**
  * Initialise the auth module.
  *
@@ -124,6 +147,7 @@ export async function AuthInit(
 ): Promise<void> {
   config = configIn;
   User.ALL_SCOPES = [...allScopes];
+  UserPasswordSetPolicy({ minLength: configIn.PASSWORD_MIN_LENGTH ?? 0 });
   const span = tracer.startSpan("AuthInit", context);
   try {
     if ((configIn.JWT_KEY ?? "") !== "") {
@@ -188,11 +212,7 @@ async function jwtDecodeCached(req: any): Promise<any | null> {
   if (req._jwtPayload) {
     return req._jwtPayload;
   }
-  const authorization = req.headers?.authorization;
-  if (!authorization) {
-    return null;
-  }
-  const token = authorization.split(" ")[1];
+  const token = extractBearerToken(req.headers?.authorization);
   if (!token) {
     return null;
   }
@@ -314,9 +334,14 @@ async function resolveApiToken(req: any, token: string): Promise<any | null> {
       rememberRejectedCredential(tokenHash);
       return null;
     }
-    if (apiToken.expiresAt && Date.parse(apiToken.expiresAt) <= Date.now()) {
-      rememberRejectedCredential(tokenHash);
-      return null;
+    if (apiToken.expiresAt) {
+      // Fail closed: an expiry that does not parse must never extend a token
+      // indefinitely (a NaN comparison would otherwise be false).
+      const expiresAtMs = Date.parse(apiToken.expiresAt);
+      if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+        rememberRejectedCredential(tokenHash);
+        return null;
+      }
     }
     const user = await UsersDataGet(span, apiToken.userId);
     if (!user) {
