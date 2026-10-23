@@ -57,10 +57,12 @@ function migrationSet(count: number): Record<string, string> {
   return files;
 }
 
-function initDb(): Promise<void> {
+function initDb(
+  overrides: Partial<SqlDbUtilsModule.SqlDbConfig> = {},
+): Promise<void> {
   return SqlDbUtilsModule.SqlDbUtilsInit(
     undefined as never,
-    { DATA_DIR: dataDir },
+    { DATA_DIR: dataDir, ...overrides },
     sqlDir,
   );
 }
@@ -402,5 +404,51 @@ describe("SqlDbUtils prepared statement cache", () => {
       "SELECT COUNT(*) as count FROM applied_log",
     );
     expect(rows[0].count).toBe(1);
+  });
+});
+
+describe("SqlDbUtilsInit pragmas", () => {
+  function pragma<T>(name: string): T {
+    return SqlDbUtilsModule.SqlDbUtilsGetDatabase().pragma(name, {
+      simple: true,
+    }) as T;
+  }
+
+  it("applies the configured journal mode, busy timeout and foreign keys", async () => {
+    writeMigrations({ "init-0000.sql": MIGRATION_0000 });
+    await initDb({
+      DATABASE_SQLITE_JOURNAL_MODE: "wal",
+      DATABASE_SQLITE_BUSY_TIMEOUT_MS: 1500,
+      DATABASE_SQLITE_FOREIGN_KEYS: true,
+    });
+
+    expect(String(pragma("journal_mode")).toLowerCase()).toBe("wal");
+    expect(pragma("busy_timeout")).toBe(1500);
+    expect(pragma("foreign_keys")).toBe(1);
+  });
+
+  it("leaves SQLite defaults untouched when the pragmas are unset", async () => {
+    writeMigrations({ "init-0000.sql": MIGRATION_0000 });
+    await initDb();
+
+    expect(String(pragma("journal_mode")).toLowerCase()).toBe("delete");
+    // better-sqlite3 enables foreign keys by default.
+    expect(pragma("foreign_keys")).toBe(1);
+  });
+
+  it("rejects an unsupported journal mode", async () => {
+    writeMigrations({ "init-0000.sql": MIGRATION_0000 });
+    await expect(
+      initDb({ DATABASE_SQLITE_JOURNAL_MODE: "sideways" }),
+    ).rejects.toThrow("Invalid DATABASE_SQLITE_JOURNAL_MODE: sideways");
+    closeCurrentDb();
+  });
+
+  it("rejects a negative busy timeout", async () => {
+    writeMigrations({ "init-0000.sql": MIGRATION_0000 });
+    await expect(
+      initDb({ DATABASE_SQLITE_BUSY_TIMEOUT_MS: -1 }),
+    ).rejects.toThrow("Invalid DATABASE_SQLITE_BUSY_TIMEOUT_MS: -1");
+    closeCurrentDb();
   });
 });

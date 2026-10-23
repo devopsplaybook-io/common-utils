@@ -5,7 +5,7 @@ import {
   convertToPostgresPlaceholders,
 } from "./DbUtils";
 
-let logger: ModuleLogger;
+let logger: ModuleLogger | undefined;
 
 /** Promise-based view of the `pg.Pool` handle returned by {@link DbUtilsGetDatabase}. */
 interface PgQueryable {
@@ -13,6 +13,11 @@ interface PgQueryable {
     sql: string,
     params: unknown[],
   ): Promise<{ rowCount: number | null; rows: unknown[] }>;
+}
+
+/** Optional `pg.Pool.connect` used to pin one client for a batch insert. */
+interface PgPoolLike extends PgQueryable {
+  connect?: () => Promise<PgQueryable & { release: () => void }>;
 }
 
 /**
@@ -52,6 +57,37 @@ function prepareCached(db: object, sql: string): any {
 const PARAMS_PER_STATEMENT = { postgres: 65535, sqlite: 32766 };
 
 /**
+ * `convertToPostgresPlaceholders` is linear in the SQL length and runs on
+ * every call, including hot ingestion paths that re-use the same generated
+ * statement. Results are cached in a bounded LRU so a stream of one-shot
+ * statements cannot grow the cache without limit.
+ */
+const CONVERTED_SQL_CACHE_MAX = 500;
+const convertedSqlCache = new Map<string, string>();
+
+function convertCached(sql: string): string {
+  const cached = convertedSqlCache.get(sql);
+  if (cached !== undefined) {
+    convertedSqlCache.delete(sql);
+    convertedSqlCache.set(sql, cached);
+    return cached;
+  }
+  const converted = convertToPostgresPlaceholders(sql);
+  if (convertedSqlCache.size >= CONVERTED_SQL_CACHE_MAX) {
+    const oldest = convertedSqlCache.keys().next().value;
+    if (oldest !== undefined) {
+      convertedSqlCache.delete(oldest);
+    }
+  }
+  convertedSqlCache.set(sql, converted);
+  return converted;
+}
+
+function logError(message: string, error: Error): void {
+  logger?.error(message, error);
+}
+
+/**
  * Injects the OTel logger instance used by no-telemetry DB operations.
  * Must be called once at startup.
  */
@@ -64,7 +100,8 @@ export function DbUtilsNoTelemetrySetLogger(loggerIn: StandardLogger): void {
  * Builds: INSERT INTO <tableCols> VALUES (?,?...),(?,?...),...
  *
  * Large inputs are chunked so the statement never exceeds the backend's
- * bound-parameter limit (65535 on Postgres, 32766 on SQLite).
+ * bound-parameter limit (65535 on Postgres, 32766 on SQLite). A chunked
+ * batch is atomic: all chunks commit together or the batch rolls back.
  *
  * @returns Number of rows inserted (summed across chunks).
  */
@@ -90,8 +127,17 @@ export function DbUtilsNoTelemetryBatchInsert(
     chunks.push(rows.slice(i, i + maxRowsPerChunk));
   }
   if (dbType === "postgres") {
-    return execChunksSequentially(chunks, tableCols, numCols);
+    return execChunksInTransaction(chunks, tableCols, numCols);
   }
+  return execChunksSqliteTransactional(chunks, tableCols, numCols);
+}
+
+/** Insert every chunk, returning the summed row count. */
+function insertChunks(
+  chunks: any[][][],
+  tableCols: string,
+  numCols: number,
+): number {
   let total = 0;
   for (const chunk of chunks) {
     total += DbUtilsNoTelemetryExecSQL(
@@ -100,6 +146,25 @@ export function DbUtilsNoTelemetryBatchInsert(
     ) as number;
   }
   return total;
+}
+
+/**
+ * SQLite: run all chunks inside one `better-sqlite3` transaction so a
+ * failure mid-batch rolls the whole insert back instead of leaving the
+ * caller with an unknown prefix of the rows.
+ */
+function execChunksSqliteTransactional(
+  chunks: any[][][],
+  tableCols: string,
+  numCols: number,
+): number {
+  const db = DbUtilsGetDatabase() as {
+    transaction?: (fn: () => number) => () => number;
+  };
+  if (typeof db.transaction === "function") {
+    return db.transaction(() => insertChunks(chunks, tableCols, numCols))();
+  }
+  return insertChunks(chunks, tableCols, numCols);
 }
 
 function buildBatchInsertSQL(
@@ -128,6 +193,48 @@ async function execChunksSequentially(
 }
 
 /**
+ * Postgres: run all chunks on one pooled client inside BEGIN/COMMIT. The
+ * whole batch commits or rolls back together; without `connect()` (e.g. a
+ * bare queryable) the chunks fall back to sequential autocommit inserts.
+ */
+async function execChunksInTransaction(
+  chunks: any[][][],
+  tableCols: string,
+  numCols: number,
+): Promise<number> {
+  const db = DbUtilsGetDatabase() as PgPoolLike;
+  if (typeof db.connect !== "function") {
+    return execChunksSequentially(chunks, tableCols, numCols);
+  }
+  const client = await db.connect();
+  let committed = false;
+  try {
+    await client.query("BEGIN", []);
+    let total = 0;
+    for (const chunk of chunks) {
+      const sql = convertCached(
+        buildBatchInsertSQL(tableCols, numCols, chunk.length),
+      );
+      const result = await client.query(sql, chunk.flat());
+      total += result.rowCount || 0;
+    }
+    await client.query("COMMIT", []);
+    committed = true;
+    return total;
+  } catch (error) {
+    if (!committed) {
+      await client.query("ROLLBACK", []).catch(() => {
+        // Connection failure: nothing to roll back.
+      });
+    }
+    logError(`SQL BATCH INSERT ERROR: ${tableCols}`, error as Error);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * Execute a write SQL statement **without** creating an OTel span.
  * Use this on high-throughput paths where span overhead matters.
  *
@@ -139,20 +246,25 @@ export function DbUtilsNoTelemetryExecSQL(
 ): number | Promise<number> {
   const dbType = DbUtilsGetType();
   if (dbType === "postgres") {
-    const pgSql = convertToPostgresPlaceholders(sql);
+    const pgSql = convertCached(sql);
     return (DbUtilsGetDatabase() as PgQueryable)
       .query(pgSql, params)
       .then((result) => result.rowCount || 0)
       .catch((error: Error) => {
-        logger.error(`SQL INSERT ERROR: ${sql.substring(0, 200)}`, error);
+        logError(`SQL INSERT ERROR: ${sql.substring(0, 200)}`, error);
         throw error;
       });
   }
   // SQLite (better-sqlite3) – synchronous
-  const db = DbUtilsGetDatabase();
-  const stmt = prepareCached(db, sql);
-  const result = stmt.run(params);
-  return result.changes;
+  try {
+    const db = DbUtilsGetDatabase();
+    const stmt = prepareCached(db, sql);
+    const result = stmt.run(params);
+    return result.changes;
+  } catch (error) {
+    logError(`SQL INSERT ERROR: ${sql.substring(0, 200)}`, error as Error);
+    throw error;
+  }
 }
 
 /**
@@ -171,16 +283,21 @@ export function DbUtilsNoTelemetryQuerySQL(
   }
   const dbType = DbUtilsGetType();
   if (dbType === "postgres") {
-    const pgSql = convertToPostgresPlaceholders(sql);
+    const pgSql = convertCached(sql);
     return (DbUtilsGetDatabase() as PgQueryable)
       .query(pgSql, params)
       .then((result) => result.rows)
       .catch((error: Error) => {
-        logger.error(`SQL ERROR: ${sql}`, error);
+        logError(`SQL ERROR: ${sql}`, error);
         throw error;
       });
   }
   // SQLite (better-sqlite3) – synchronous
-  const stmt = prepareCached(DbUtilsGetDatabase(), sql);
-  return stmt.all(params);
+  try {
+    const stmt = prepareCached(DbUtilsGetDatabase(), sql);
+    return stmt.all(params);
+  } catch (error) {
+    logError(`SQL ERROR: ${sql}`, error as Error);
+    throw error;
+  }
 }

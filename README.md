@@ -39,6 +39,8 @@ npm install @devopsplaybook.io/common-utils
 | `jsonwebtoken`                          | JWT signing/verification for the auth module           |
 | `fastify`                               | HTTP framework types for the users routes              |
 
+**Node.js >= 22.12 is required** (`engines.node`): `uuid` v14 ships as ESM-only and this package is CommonJS, so `require("uuid")` relies on Node's `require(esm)` support, available from 22.12.
+
 `fastify` is kept as a regular dependency (not a peer dependency) because `UsersRoutes` is typed against its `FastifyInstance` / `RequestGenericInterface` types: apps that register the routes already have fastify, and apps that don't use the routes must not be forced to add it.
 
 `@devopsplaybook.io/otel-utils-fastify` is a regular dependency for the same reason: `UsersRoutes` resolves the request span with its `OTelRequestSpan(req)`, which reads the span map populated by the library's Fastify hooks. The lookup needs the application and `common-utils` to share a single physical copy of that package; compatible `^1.x` ranges in both are deduped by npm, so a pinned older copy must be avoided.
@@ -56,6 +58,7 @@ npm install @devopsplaybook.io/common-utils
 | `@devopsplaybook.io/common-utils/users`       | auth/users/routes module                     |
 | `@devopsplaybook.io/common-utils/notifications` | `NotificationsClient`                      |
 | `@devopsplaybook.io/common-utils/llm`         | `LLMClient`                                  |
+| `@devopsplaybook.io/common-utils/http-retry`  | `HttpRetry`                                  |
 | `@devopsplaybook.io/common-utils/system`      | `SystemCommandExecute`                       |
 | `@devopsplaybook.io/common-utils/timeout`     | `TimeoutWait`                                |
 
@@ -128,6 +131,8 @@ await config.reload();
 | `AUTH_RATE_LIMIT_LOGIN_MAX`                       | `10` (`<= 0` disables)               | No                                  |
 | `AUTH_RATE_LIMIT_REFRESH_MAX`                     | `60` (`<= 0` disables)               | No                                  |
 | `AUTH_RATE_LIMIT_WINDOW_SECONDS`                  | `60`                                 | No                                  |
+| `PASSWORD_MIN_LENGTH`                             | `0` (non-empty only)                 | No                                  |
+| `API_TOKENS_REVOKE_ON_PASSWORD_CHANGE`            | `false`                              | No                                  |
 | `CORS_POLICY_ORIGIN`                              | `""`                                 | No                                  |
 | `DATA_DIR`                                        | `/data`                              | No                                  |
 | `JWT_KEY`                                         | `""` (DB-managed, see `AuthInit`)    | Yes                                 |
@@ -140,9 +145,12 @@ await config.reload();
 | `DATABASE_POSTGRES_DATABASE`                      | `""`                                 | No                                  |
 | `DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS`          | `0` (disabled)                       | No                                  |
 | `DATABASE_POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS` | `0` (disabled)                      | No                                  |
+| `DATABASE_SQLITE_JOURNAL_MODE`                    | `""` (SQLite default)                | No                                  |
+| `DATABASE_SQLITE_BUSY_TIMEOUT_MS`                 | `0` (driver default)                 | No                                  |
+| `DATABASE_SQLITE_FOREIGN_KEYS`                    | `true`                               | No                                  |
 | All `OPENTELEMETRY_COLLECTOR_*` fields            | Various                              | No (except `_AUTHORIZATION_HEADER`) |
 
-`VERSION` is detected from the library's own `package.json` (correct also for the published layout) and can be overridden like any other field via the `VERSION` environment variable or the config file. `SERVICE_ID` can be overridden the same way. Values loaded from the environment or the config file are coerced to the type of the default value (numbers, booleans, arrays), so `"DATABASE_POSTGRES_PORT": "5433"` in `config.json` is applied as the number `5433`. An unsupported `DATABASE_TYPE` makes `DbUtilsInit` reject with an explicit error.
+`VERSION` is detected from the library's own `package.json` (correct also for the published layout, read once per process) and can be overridden like any other field via the `VERSION` environment variable or the config file. `SERVICE_ID` can be overridden the same way. Values loaded from the environment or the config file are coerced to the type of the default value (numbers, booleans, arrays), so `"DATABASE_POSTGRES_PORT": "5433"` in `config.json` is applied as the number `5433`. Boolean strings are case-insensitive (`true/false`, `1/0`, `yes/no`); an invalid number, boolean or JSON value rejects `reload()` with an explicit error instead of silently keeping a string or disabling a feature. Re-registering an existing field through `addConfigField` merges aliases and never drops its `sensitive` flag. A config file that exists but cannot be read or parsed is logged (a missing file is normal and stays silent). An unsupported `DATABASE_TYPE` makes `DbUtilsInit` reject with an explicit error.
 
 `JWT_KEY` defaults to an empty string, which means **DB-managed**: `AuthInit` loads the key from `metadata.auth_token` and generates/persists one when absent. A non-empty value from the environment or the config file always takes precedence and is never written to the database (see the auth section for precedence and rotation).
 
@@ -186,7 +194,15 @@ const changes = SqlDbUtilsExecSQL(
 | `SqlDbUtilsExecSQLFile` | `(span, filename)`             | Execute an entire SQL file                       |
 | `SqlDbUtilsGetDatabase` | `()`                           | Returns the `better-sqlite3` `Database` instance |
 
-**Migration convention**: Files named `init-NNNN.sql` in `sqlDir`, applied in order. `init-0000.sql` must exist (it creates the `metadata` table) — a missing file rejects the init. Each migration file and its `db_version` row are applied inside a single transaction: a failing migration is rolled back, its version is **not** recorded, and it is retried on the next boot. Applied versions are compared numerically — `metadata.value` is a text-affinity column, so a plain `MAX(value)` would order `"9"` after `"10"` and re-apply the tenth and later migrations forever. SQLite has a single writer: never point two processes at the same database file while init/migrations run (Postgres is protected by an advisory lock instead).
+**Migration convention**: Files named `init-NNNN.sql` in `sqlDir`, applied in order. The name must match exactly (`^init-NNNN.sql$`): a file such as `backup-init-0005.sql` or `init-0005.sql.bak` is ignored. `init-0000.sql` must exist (it creates the `metadata` table) — a missing file rejects the init. Each migration file and its `db_version` row are applied inside a single transaction: a failing migration is rolled back, its version is **not** recorded, and it is retried on the next boot. Applied versions are compared numerically — `metadata.value` is a text-affinity column, so a plain `MAX(value)` would order `"9"` after `"10"` and re-apply the tenth and later migrations forever. SQLite has a single writer: never point two processes at the same database file while init/migrations run (Postgres is protected by an advisory lock instead).
+
+Optional SQLite pragmas are applied when the database is opened:
+
+| Config field                     | Effect                                                                 |
+| -------------------------------- | ---------------------------------------------------------------------- |
+| `DATABASE_SQLITE_JOURNAL_MODE`   | `delete` (default), `truncate`, `persist`, `memory`, `wal` or `off`    |
+| `DATABASE_SQLITE_BUSY_TIMEOUT_MS`| How long a write waits for a lock before failing (`0` = driver default)|
+| `DATABASE_SQLITE_FOREIGN_KEYS`   | Enable `PRAGMA foreign_keys` (default on, matching better-sqlite3)     |
 
 ---
 
@@ -202,8 +218,9 @@ Async (Promise-based) database operations using `pg.Pool`, with OTel tracing.
 | `PostgresDbUtilsQuerySQL`          | `(span, sql, params?, debug?)` | Execute read, returns `Promise<any[]>`   |
 | `PostgresDbUtilsExecSQLFile`       | `(span, filename)`             | Execute an entire SQL file               |
 | `PostgresDbUtilsGetPool`           | `()`                           | Returns the `pg.Pool` instance           |
-| `PostgresDbUtilsTransactionStart`  | `(span)`                       | Begin a transaction (`BEGIN`)            |
-| `PostgresDbUtilsTransactionCommit` | `(span)`                       | Commit a transaction (`COMMIT`)          |
+| `PostgresDbUtilsTransaction`       | `(span, callback)`             | Run a callback on one client inside `BEGIN`/`COMMIT`, rolling back on error |
+| `PostgresDbUtilsTransactionStart`  | `(span)`                       | **Deprecated** — `BEGIN` on a pooled connection; use `PostgresDbUtilsTransaction` |
+| `PostgresDbUtilsTransactionCommit` | `(span)`                       | **Deprecated** — may commit a different session; use `PostgresDbUtilsTransaction` |
 
 Pool defaults: `max: 20`, `idleTimeoutMillis: 30000`, `connectionTimeoutMillis: 10000`. `DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS` and `DATABASE_POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS` set the matching per-session settings on every pool (`0`, the default, keeps them disabled — the historical behaviour). Migrations run inside a transaction and are serialised across replicas with a Postgres advisory lock, so two pods booting at the same time cannot apply the same `init-NNNN.sql` twice. The same migration conventions as SQLite apply (`init-0000.sql` must exist, versions are compared numerically).
 
@@ -330,7 +347,7 @@ DbUtilsNoTelemetryBatchInsert(
 | `DbUtilsNoTelemetryQuerySQL(sql, params?, debug?)`        | Read without spans                |
 | `DbUtilsNoTelemetryBatchInsert(tableCols, numCols, rows)` | Optimized multi-row INSERT        |
 
-Repeated statements are compiled once per connection: prepared statements are cached per SQL string (bounded cache, cleared on re-init), which removes the per-call `prepare` cost on ingestion hot paths. `DbUtilsNoTelemetryBatchInsert` chunks large row sets automatically so the generated statement stays below the driver parameter limit (65535 parameters for Postgres, 32766 for SQLite) instead of failing with an opaque driver error.
+Repeated statements are compiled once per connection: prepared statements are cached per SQL string (bounded cache, cleared on re-init), which removes the per-call `prepare` cost on ingestion hot paths. `DbUtilsNoTelemetryBatchInsert` chunks large row sets automatically so the generated statement stays below the driver parameter limit (65535 parameters for Postgres, 32766 for SQLite) instead of failing with an opaque driver error. A chunked batch is atomic: SQLite runs all chunks in one `better-sqlite3` transaction and Postgres runs them on one pooled client inside `BEGIN`/`COMMIT`, so a failure mid-batch inserts **none** of the rows. `?`-to-`$N` conversion results are cached in a bounded LRU on the Postgres path.
 
 ---
 
@@ -366,13 +383,15 @@ await client.send({
 | Export                 | Description                                                       |
 | ---------------------- | ----------------------------------------------------------------- |
 | `NotificationsClient`  | HTTP client with `send` plus `info`/`success`/`warning`/`error` helpers |
-| `NotificationsConfig`  | `{ apiEndpoint, apiToken, logger? }` constructor configuration      |
+| `NotificationsConfig`  | `{ apiEndpoint, apiToken, timeoutMs?, retry?, logger? }` constructor configuration |
 | `NotificationPayload`  | `{ title, body?, source?, severity?, data? }` request payload      |
 | `NotificationResponse` | Shape returned by the notifications API                            |
 | `NotificationSeverity` | `"info" \| "warning" \| "error" \| "success"`                    |
 | `NotificationsLogger` | Minimal logger interface (`info`/`warn`/`error`), console by default |
 
 **Behaviour when not configured**: when `apiEndpoint` or `apiToken` is empty the client logs `"Notifications integration disabled (...)"` once at construction and every `send`/helper call resolves to `null` without logging, so the parent application never fails.
+
+**Timeouts and retries**: requests time out after 10 seconds by default; `timeoutMs` overrides the value and `timeoutMs: 0` disables the timeout (non-finite or negative values fall back to the default). `retry` optionally retries network errors, HTTP 429 and 5xx responses with exponential backoff and full jitter (`{ maxAttempts?, baseDelayMs?, maxDelayMs? }`, see `HttpRetry`); retries are disabled by default and each retry is logged through `logger.warn` without request headers or the API token.
 
 ---
 
@@ -408,13 +427,13 @@ if (llm.isEnabled()) {
 | Export               | Description                                                                |
 | -------------------- | -------------------------------------------------------------------------- |
 | `LLMClient`          | HTTP client with `isEnabled()` and `request(messages, options?)`           |
-| `LLMClientConfig`    | `{ apiKey, apiUrl, model, timeoutMs?, logger? }` constructor configuration |
+| `LLMClientConfig`    | `{ apiKey, apiUrl, model, timeoutMs?, retry?, logger? }` constructor configuration |
 | `LLMMessage`         | `{ role, content }` chat message                                           |
-| `LLMRequestOptions`  | `{ jsonMode?, model? }` per-request overrides                              |
+| `LLMRequestOptions`  | `{ jsonMode?, model?, timeoutMs? }` per-request overrides                  |
 | `LLMResponse`        | `{ content, totalTokens }` normalized response                             |
-| `LLMLogger`          | Minimal logger interface (`info`/`error`), console by default              |
+| `LLMLogger`          | Minimal logger interface (`info`/`error`, optional `warn`), console by default |
 
-**Behaviour details**: requests are sent with `stream: false` and Bearer authentication; the default timeout is 120 seconds (`timeoutMs` overrides it). Provider errors are rethrown as `Error` carrying the provider message when available (e.g., `error.message` from the HTTP response). An empty content is returned as-is — applications that need an empty-content policy (e.g., retry on reasoning models) keep it in their own code.
+**Behaviour details**: requests are sent with `stream: false` and Bearer authentication; the default timeout is 120 seconds (`timeoutMs` overrides it, and `timeoutMs: 0` on a request disables it). Provider errors are rethrown as `Error` carrying the provider message when available (e.g., `error.message` from the HTTP response). An empty content is returned as-is — applications that need an empty-content policy (e.g., retry on reasoning models) keep it in their own code. `retry` optionally retries network errors, HTTP 429 and 5xx responses with exponential backoff; it is disabled by default because retrying a completion can duplicate work and billing (see `HttpRetry`).
 
 ---
 
@@ -452,10 +471,13 @@ fastify.register(new UsersRoutes().getRoutes, { prefix: "/api/users" });
 | `AUTH_ERROR_CODE_UNAUTHENTICATED` / `AUTH_ERROR_CODE_FORBIDDEN` / `AUTH_ERROR_CODE_INVALID_CREDENTIALS` | Stable machine-readable codes (`"UNAUTHENTICATED"`, `"FORBIDDEN"`, `"INVALID_CREDENTIALS"`) |
 | `AuthJwtRevocationEnabled` / `AuthGetApiTokensMaxPerUser` | Current `JWT_REVOCATION_ENABLED` / `API_TOKENS_MAX_PER_USER` values |
 | `AuthGetRateLimitLoginMax` / `AuthGetRateLimitRefreshMax` / `AuthGetRateLimitWindowSeconds` | Current `AUTH_RATE_LIMIT_*` values (defaults 10 / 60 / 60) |
+| `AuthSetAuditHandler` / `AuthAuditEmit` / `AuthAuditEvent` | Structured audit events (see **Audit events** below) |
 | `User`, `UserRole`, `UserScope` | User model; scopes are application-defined strings. `User.fromJson(payload)` returns `null` when the payload is missing **or has no `id`** — it never fabricates a fresh identity for an unidentified payload |
 | `UserSession`                | Decoded session: `isAuthenticated`, `userId`, `userName`, `role`, `scopes` |
 | `UserApiToken`               | API token model (only the SHA-256 hash is persisted)                   |
-| `UserPasswordSetPassword` / `UserPasswordCheckPassword` | bcrypt hashing and verification             |
+| `UserPasswordSetPolicy` / `UserPasswordGetMinLength` | Install a password policy (minimum length and optional custom validator) |
+| `UserPasswordValidate`       | Returns an error message when a password violates the policy/72-byte bcrypt limit, otherwise `null` |
+| `UserPasswordSetPassword` / `UserPasswordCheckPassword` / `UserPasswordCheckPasswordDummy` | bcrypt hashing, verification and the timing-equalizing dummy compare |
 | `UsersDataSetOTel`           | Injects the OTel tracer used by the users data module                  |
 | `UsersData*`                 | Users table CRUD (`Get`, `GetByName`, `List`, `Count`, `CountAdmins`, `Add`, `UpdateUser`, `UpdatePassword`, `Delete`, `BumpTokenVersion`) |
 | `isUniqueViolationError`     | Detects unique-constraint violations (SQLite/Postgres)                 |
@@ -471,6 +493,12 @@ fastify.register(new UsersRoutes().getRoutes, { prefix: "/api/users" });
 
 **Rate limiting**: `POST /session` is limited per IP + lowercased username (default 10 per 60 s) and `POST /session/refresh` per IP (default 60 per 60 s); configure with `AUTH_RATE_LIMIT_LOGIN_MAX`, `AUTH_RATE_LIMIT_REFRESH_MAX` and `AUTH_RATE_LIMIT_WINDOW_SECONDS`. A value `<= 0` disables the limiter for that route. Exceeding a limit answers **429** with `{ error: "Too Many Requests", code: "RATE_LIMITED", ... }` and a `Retry-After` header. The limiter is registered lazily by `UsersRoutes` (`@fastify/rate-limit`, `hook: "preHandler"` so the login body is parsed before keying). Behind a trusted reverse proxy, enable Fastify's `trustProxy` so the client IP is used instead of the proxy's; otherwise proxy-level limits are recommended.
 
+**Password policy**: passwords must be non-empty and at most 72 bytes — bcrypt silently truncates longer input, which would make two long passwords sharing the first 72 bytes interchangeable. `AuthInit` installs `PASSWORD_MIN_LENGTH` (default `0`) through `UserPasswordSetPolicy`; applications may call it again with a custom `validator` for complexity rules. `UserPasswordValidate` returns the same message the routes send in a 400, and `UserPasswordSetPassword` refuses to hash an invalid password.
+
+**Audit events**: `AuthSetAuditHandler(handler)` installs a callback that receives structured events for `login_success`, `login_failure`, `user_create`, `user_update`, `user_delete`, `password_change`, `api_token_create` and `api_token_revoke`; each event carries `outcome`, an ISO `timestamp`, actor/target ids and names, changed field names, token id and request IP where applicable. Events never contain passwords, password hashes, JWTs or API-token values/hashes. A throwing handler is swallowed so auditing can never fail a request, and without a handler events are dropped.
+
+**Token invalidation on password change**: with `API_TOKENS_REVOKE_ON_PASSWORD_CHANGE=true` (default `false`) `PUT /password` and an admin password reset delete every API token owned by the user. With `JWT_REVOCATION_ENABLED=true` the same routes also bump `tokenVersion`, invalidating issued JWTs. Enabling JWT revocation by default is planned for a future major release: it requires the `users.tokenVersion` column and one extra user read per request, so it stays opt-in here.
+
 **Response caching**: the credential responses (`POST /session`, `POST /session/refresh`, `POST /tokens`) send `Cache-Control: no-store`, `Pragma: no-cache` and `Vary: Authorization`.
 
 **2.0.0 breaking changes**: unauthenticated requests now answer **401** with a code instead of 403 (login failures answer 401 `INVALID_CREDENTIALS` instead of 403); the guards and `ProjectAccess`-style helpers must use `AuthGetLiveUser` because the JWT role/scopes claims are no longer authoritative; `ConfigBase.JWT_KEY` now defaults to `""` and a configured value is honored instead of being overwritten from the database; login/refresh are throttled by default; `@fastify/rate-limit` is a new runtime dependency.
@@ -481,15 +509,15 @@ fastify.register(new UsersRoutes().getRoutes, { prefix: "/api/users" });
 | ------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | `users`             | `id`, `name`, `passwordEncrypted`, `role`, `scopes`                                          | Add a **case-insensitive unique index** on the name (`CREATE UNIQUE INDEX ... ON users (LOWER("name"))`): duplicate names differing only by case (e.g. `"Admin"` / `"admin"`) are then rejected with 400. With `JWT_REVOCATION_ENABLED` also add `"tokenVersion" INTEGER DEFAULT 0`. |
 | `users_api_tokens`  | `id`, `name`, `userId`, `tokenHash`, `dateCreated`                                           | Unique index on `tokenHash` and an index on `userId`. Optional additive migration for token expiry / last use: `"expiresAt" TEXT`, `"lastUsedAt" TEXT`. |
-| `metadata`          | created by `init-0000.sql`                                                                   | Stores the JWT key, the first-admin bootstrap marker and the applied migration versions.                                           |
+| `metadata`          | created by `init-0000.sql`                                                                   | Stores the JWT key and the applied migration versions.                                                                             |
 
 SQL is written SQLite-first; the `DbUtils` facade converts placeholders for Postgres.
 
-**API tokens**: users create their own API tokens via `POST /api/users/tokens` (body `{ name, expiresAt? }`); the plaintext token is returned exactly once and only its SHA-256 hash is stored. Names are limited to 255 characters and each user may hold at most `API_TOKENS_MAX_PER_USER` (default `100`) tokens. `GET /api/users/tokens` lists the caller's tokens and `DELETE /api/users/tokens/:id` revokes one (owner or admin). `expiresAt` must be a future ISO 8601 date and requires the optional `expiresAt` column — creating a token with an expiry before that migration answers 400. `lastUsedAt` is refreshed at most once per hour and requires its optional column (silently skipped otherwise). Requests authenticated with `Authorization: Bearer <api-token>` resolve the owning user's live role and scopes on every request, so role/scope changes apply immediately and revocation is instant; unknown credentials are negatively cached for a short time so a bad-token flood does not hit the database on every request.
+**API tokens**: users create their own API tokens via `POST /api/users/tokens` (body `{ name, expiresAt? }`); the plaintext token is returned exactly once and only its SHA-256 hash is stored. An `expiresAt` value that does not parse is rejected at authentication time (fail closed), so a corrupted row can never extend a token indefinitely. Names are limited to 255 characters and each user may hold at most `API_TOKENS_MAX_PER_USER` (default `100`) tokens. `GET /api/users/tokens` lists the caller's tokens and `DELETE /api/users/tokens/:id` revokes one (owner or admin). `expiresAt` must be a future ISO 8601 date and requires the optional `expiresAt` column — creating a token with an expiry before that migration answers 400. `lastUsedAt` is refreshed at most once per hour and requires its optional column (silently skipped otherwise). Requests authenticated with `Authorization: Bearer <api-token>` resolve the owning user's live role and scopes on every request, so role/scope changes apply immediately and revocation is instant; unknown credentials are negatively cached for a short time so a bad-token flood does not hit the database on every request.
 
 **JWT revocation (opt-in)**: `role` and `scopes` are baked into a JWT at signing time, so a token stays valid (default 3 months) after the user is deleted or their role changes. With `JWT_REVOCATION_ENABLED=true` (default `false`, the default validity is unchanged) every JWT request re-reads the user and rejects tokens whose `tokenVersion` claim is stale; password changes, role/scope changes and deletion therefore invalidate previously issued JWTs. This requires the `users.tokenVersion` column. JWTs are always verified as HS256 (`algorithms: ["HS256"]` is pinned); `iss`/`aud` are not set.
 
-**Response conventions**: creation answers 201, reads and deletes answer 200. Malformed or bodyless writes answer 400 (`Missing: …`) instead of HTTP 500, and the last remaining admin cannot demote or delete themselves (`At least 1 admin must be defined`). `GET /` is paginated with `?limit=&offset=` (invalid values answer 400); the bootstrap emptiness check and the last-admin guards use `COUNT(*)` queries instead of loading every row. Unauthenticated requests answer 401 `UNAUTHENTICATED`, forbidden ones 403 `FORBIDDEN`; the guards **send the response and then throw** — callers must wrap the guard in `try/catch` and `return` from the catch block (see the `UsersRoutes` implementations) so the route does not continue after the response.
+**Response conventions**: creation answers 201, reads and deletes answer 200. Malformed or bodyless writes answer 400 (`Missing: …` / `Invalid: …`) instead of HTTP 500: every body field is checked for presence **and type** at the route boundary. `GET /` is ordered by name and paginated with `?limit=&offset=`: the default page size is 100, the maximum is 1000, `offset` requires `limit`, and invalid values answer 400. The bootstrap insert, the last-admin guard and the API-token cap are enforced atomically in SQL (the first-admin insert only runs while the table is empty, the demotion/delete only while another admin remains, and the token insert only below the cap), serialised across Postgres replicas with advisory locks; deleting a user removes its API tokens in the same transaction. Credentials must use the `Bearer` scheme (case-insensitive): another scheme carrying a valid JWT is rejected. Unknown usernames run a dummy bcrypt compare so login timing does not reveal whether an account exists. Unauthenticated requests answer 401 `UNAUTHENTICATED`, forbidden ones 403 `FORBIDDEN`; the guards **send the response and then throw** — callers must wrap the guard in `try/catch` and `return` from the catch block (see the `UsersRoutes` implementations) so the route does not continue after the response.
 
 ---
 
@@ -500,6 +528,7 @@ import {
   SystemCommandExecute,
   SystemCommandExecuteWithOutput,
   SystemCommandExecFile,
+  SystemCommandExecFileWithOutput,
 } from "@devopsplaybook.io/common-utils";
 
 const output = await SystemCommandExecute("ls -la /tmp", { cwd: "/home" });
@@ -509,6 +538,9 @@ const { stdout, stderr } = await SystemCommandExecuteWithOutput("make build");
 
 // No shell: arguments are passed verbatim (safe for user-controlled values):
 const listing = await SystemCommandExecFile("ls", ["-la", userPath]);
+
+// Same, with both output streams:
+const result = await SystemCommandExecFileWithOutput("ls", ["-la", userPath]);
 ```
 
 | Export                         | Description                                                                  |
@@ -516,8 +548,11 @@ const listing = await SystemCommandExecFile("ls", ["-la", userPath]);
 | `SystemCommandExecute`         | Run a shell command, resolves stdout; on failure the rejection error carries the captured `stdout`/`stderr` |
 | `SystemCommandExecuteWithOutput` | Same, but resolves `{ stdout, stderr }`                                    |
 | `SystemCommandExecFile`        | Run an executable **without a shell** with literal arguments (no metacharacter interpretation), resolves stdout |
+| `SystemCommandExecFileWithOutput` | Same, but resolves `{ stdout, stderr }`                                   |
 
-> **Security**: `SystemCommandExecute` and `SystemCommandExecuteWithOutput` run the command string through a shell — **never interpolate untrusted input** (user input, request payloads, stored values) into it. Use `SystemCommandExecFile` for user-controlled values.
+> **Security**: `SystemCommandExecute` and `SystemCommandExecuteWithOutput` run the command string through a shell — **never interpolate untrusted input** (user input, request payloads, stored values) into it. Use `SystemCommandExecFile` / `SystemCommandExecFileWithOutput` for user-controlled values.
+
+> **Process limits**: the `ExecFile` variants inherit the Node.js defaults: captured output is capped at 1 MiB (`maxBuffer`) and there is **no timeout**, so a hung executable runs forever. Pass explicit `options.timeout` and a larger `options.maxBuffer` when the program may hang or produce large output.
 
 #### `Timeout` -- Promise-based Delay
 
@@ -526,6 +561,29 @@ import { TimeoutWait } from "@devopsplaybook.io/common-utils";
 
 await TimeoutWait(5000); // wait 5 seconds
 ```
+
+`TimeoutWait` rejects with a `RangeError` for non-numeric, non-finite, negative or oversized durations (larger than `TIMEOUT_MAX_DURATION_MS`, the largest delay `setTimeout` accepts); valid durations resolve after the delay, and `0` resolves on the next tick.
+
+#### `HttpRetry` -- Bounded HTTP Retry
+
+Shared retry helper used by the notifications and LLM clients. It retries only transient failures — network/timeout errors (Axios errors without a response), HTTP 429 and 5xx — using exponential backoff with full jitter. Other errors (including 4xx) are rethrown immediately. Retrying is **disabled by default** (`maxAttempts: 1`) because retrying non-idempotent requests (for example an LLM completion) can duplicate work and billing.
+
+```ts
+import { HttpRetry } from "@devopsplaybook.io/common-utils";
+
+const response = await HttpRetry(
+  () => axios.get(url),
+  { maxAttempts: 3, baseDelayMs: 250, maxDelayMs: 10000 },
+  (attempt, delayMs) => logger.warn(`attempt ${attempt} failed; retrying in ${delayMs} ms`),
+);
+```
+
+| Export                       | Description                                                              |
+| ---------------------------- | ------------------------------------------------------------------------ |
+| `HttpRetry`                  | Run an operation with bounded, jittered backoff                          |
+| `HttpRetryOptions`           | `{ maxAttempts?, baseDelayMs?, maxDelayMs? }` (attempts capped at 10)    |
+| `HttpRetryNormalizeOptions`  | Validate and clamp options to their defaults                             |
+| `HttpRetryIsRetryable`       | `true` for network errors, HTTP 429 and 5xx                              |
 
 ### Quick Start
 

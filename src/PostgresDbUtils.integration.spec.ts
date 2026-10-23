@@ -15,6 +15,7 @@ import {
   PostgresDbUtilsInit,
   PostgresDbUtilsQuerySQL,
   PostgresDbUtilsSetOTel,
+  PostgresDbUtilsTransaction,
   PostgresDbUtilsWithAdvisoryLock,
   PostgresSchemaDbUtils,
 } from "./PostgresDbUtils";
@@ -44,6 +45,7 @@ const mockTracer = {
   startSpan: () => ({
     end: () => undefined,
     setStatus: () => undefined,
+    setAttributes: () => undefined,
     addEvent: () => undefined,
   }),
 } as unknown as StandardTracer;
@@ -213,6 +215,34 @@ describeWithDocker("PostgresDbUtils integration (real PostgreSQL)", () => {
       "SELECT name FROM items ORDER BY id",
     );
     expect(rows.map((row) => row.name)).toEqual(["first", "second"]);
+  });
+
+  it("commits a callback transaction and rolls it back on failure", async () => {
+    writeMigration("init-0000.sql", MIGRATION_0000);
+    writeMigration(
+      "init-0001.sql",
+      "CREATE TABLE tx_items (id SERIAL PRIMARY KEY, name TEXT NOT NULL);",
+    );
+    await PostgresDbUtilsInit(undefined as never, makeConfig(), sqlDir);
+
+    await PostgresDbUtilsTransaction(undefined, async (client) => {
+      await client.query("INSERT INTO tx_items (name) VALUES ($1)", ["kept"]);
+    });
+
+    await expect(
+      PostgresDbUtilsTransaction(undefined, async (client) => {
+        await client.query("INSERT INTO tx_items (name) VALUES ($1)", [
+          "rolled back",
+        ]);
+        throw new Error("abort");
+      }),
+    ).rejects.toThrow("abort");
+
+    const rows = await PostgresDbUtilsQuerySQL(
+      undefined,
+      "SELECT name FROM tx_items ORDER BY id",
+    );
+    expect(rows.map((row) => row.name)).toEqual(["kept"]);
   });
 
   it("serialises concurrent callbacks on the advisory lock", async () => {

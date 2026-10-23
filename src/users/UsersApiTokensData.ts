@@ -154,6 +154,64 @@ export async function UsersApiTokensDataAdd(
   }
 }
 
+/**
+ * Insert a token only while the owner stays below `maxTokens`. The cap check
+ * is part of the INSERT, so concurrent token creations cannot both pass a
+ * count-then-insert guard (run it under {@link DbUtilsWithLock} with a
+ * per-user lock to serialise Postgres replicas).
+ *
+ * @returns `true` when the token was inserted, `false` when the cap is
+ *          already reached.
+ */
+export async function UsersApiTokensDataAddIfBelowCap(
+  context: Span | undefined,
+  apiToken: UserApiToken,
+  maxTokens: number,
+): Promise<boolean> {
+  const span = tracer.startSpan("UsersApiTokensDataAddIfBelowCap", context);
+  try {
+    let changes: number;
+    if (apiToken.expiresAt) {
+      if (!(await UsersApiTokensDataSupportsOptionalColumns(context))) {
+        throw new Error(
+          "users_api_tokens.expiresAt does not exist: run the documented migration to enable API token expiry",
+        );
+      }
+      changes = await DbUtilsExecSQL(
+        span,
+        SQL_QUERIES.INSERT_TOKEN_WITH_EXPIRY_IF_BELOW_CAP,
+        [
+          apiToken.id,
+          apiToken.name,
+          apiToken.userId,
+          apiToken.tokenHash,
+          apiToken.dateCreated,
+          apiToken.expiresAt,
+          apiToken.userId,
+          maxTokens,
+        ],
+      );
+    } else {
+      changes = await DbUtilsExecSQL(
+        span,
+        SQL_QUERIES.INSERT_TOKEN_IF_BELOW_CAP,
+        [
+          apiToken.id,
+          apiToken.name,
+          apiToken.userId,
+          apiToken.tokenHash,
+          apiToken.dateCreated,
+          apiToken.userId,
+          maxTokens,
+        ],
+      );
+    }
+    return changes > 0;
+  } finally {
+    span.end();
+  }
+}
+
 export async function UsersApiTokensDataDelete(
   context: Span | undefined,
   id: string,
@@ -229,6 +287,10 @@ const SQL_QUERIES = {
     'INSERT INTO users_api_tokens ("id", "name", "userId", "tokenHash", "dateCreated") VALUES (?, ?, ?, ?, ?)',
   INSERT_TOKEN_WITH_EXPIRY:
     'INSERT INTO users_api_tokens ("id", "name", "userId", "tokenHash", "dateCreated", "expiresAt") VALUES (?, ?, ?, ?, ?, ?)',
+  INSERT_TOKEN_IF_BELOW_CAP:
+    'INSERT INTO users_api_tokens ("id", "name", "userId", "tokenHash", "dateCreated") SELECT ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM users_api_tokens WHERE "userId" = ?) < ?',
+  INSERT_TOKEN_WITH_EXPIRY_IF_BELOW_CAP:
+    'INSERT INTO users_api_tokens ("id", "name", "userId", "tokenHash", "dateCreated", "expiresAt") SELECT ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM users_api_tokens WHERE "userId" = ?) < ?',
   UPDATE_TOKEN_LAST_USED:
     'UPDATE users_api_tokens SET "lastUsedAt" = ? WHERE "id" = ?',
   DELETE_TOKEN: 'DELETE FROM users_api_tokens WHERE "id" = ?',

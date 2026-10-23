@@ -1,5 +1,9 @@
 jest.mock("axios", () => ({
   create: jest.fn(),
+  isAxiosError: (err: unknown) =>
+    typeof err === "object" &&
+    err !== null &&
+    (err as { isAxiosError?: boolean }).isAxiosError === true,
 }));
 
 import axios from "axios";
@@ -111,6 +115,60 @@ describe("NotificationsClient", () => {
 
       logSpy.mockRestore();
     });
+
+    it("should default the request timeout to 10000 ms", () => {
+      new NotificationsClient({
+        apiEndpoint: "http://localhost/api/notifications",
+        apiToken: "token",
+        logger: mockLogger,
+      });
+
+      expect(mockedCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ timeout: 10000 }),
+      );
+    });
+
+    it("should honor a custom request timeout", () => {
+      new NotificationsClient({
+        apiEndpoint: "http://localhost/api/notifications",
+        apiToken: "token",
+        timeoutMs: 2500,
+        logger: mockLogger,
+      });
+
+      expect(mockedCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ timeout: 2500 }),
+      );
+    });
+
+    it("should disable the request timeout when timeoutMs is 0", () => {
+      new NotificationsClient({
+        apiEndpoint: "http://localhost/api/notifications",
+        apiToken: "token",
+        timeoutMs: 0,
+        logger: mockLogger,
+      });
+
+      expect(mockedCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ timeout: 0 }),
+      );
+    });
+
+    it.each([Number.NaN, -1, Number.POSITIVE_INFINITY])(
+      "should fall back to the default timeout for invalid value %s",
+      (timeoutMs) => {
+        new NotificationsClient({
+          apiEndpoint: "http://localhost/api/notifications",
+          apiToken: "token",
+          timeoutMs,
+          logger: mockLogger,
+        });
+
+        expect(mockedCreate).toHaveBeenCalledWith(
+          expect.objectContaining({ timeout: 10000 }),
+        );
+      },
+    );
   });
 
   describe("send", () => {
@@ -199,8 +257,36 @@ describe("NotificationsClient", () => {
       expect(result).toBeNull();
       expect(mockLogger.error).toHaveBeenCalledWith(
         "NotificationsClient: failed to send notification",
-        failure,
+        { name: "Error", message: "network down" },
       );
+    });
+
+    it("should never log the request config or Authorization header", async () => {
+      const client = new NotificationsClient({
+        apiEndpoint: "http://localhost/api/notifications",
+        apiToken: "super-secret-token",
+        logger: mockLogger,
+      });
+      const failure = Object.assign(new Error("Request failed 500"), {
+        isAxiosError: true,
+        code: "ERR_BAD_RESPONSE",
+        config: { headers: { Authorization: "Bearer super-secret-token" } },
+        response: { status: 500 },
+      });
+      mockPost.mockRejectedValue(failure);
+
+      await client.send({ title: "Test" });
+
+      const logged = mockLogger.error.mock.calls[0][1];
+      expect(logged).toEqual({
+        name: "Error",
+        message: "Request failed 500",
+        status: 500,
+        code: "ERR_BAD_RESPONSE",
+      });
+      expect(JSON.stringify(logged)).not.toContain("super-secret-token");
+      expect(JSON.stringify(logged)).not.toContain("Authorization");
+      expect(JSON.stringify(logged)).not.toContain("config");
     });
 
     it("should not reject when the request fails", async () => {
@@ -212,6 +298,112 @@ describe("NotificationsClient", () => {
       mockPost.mockRejectedValue(new Error("network down"));
 
       await expect(client.send({ title: "Test" })).resolves.toBeNull();
+    });
+
+    describe("retry", () => {
+      function createRetryingClient(): NotificationsClient {
+        return new NotificationsClient({
+          apiEndpoint: "http://localhost/api/notifications",
+          apiToken: "super-secret-token",
+          logger: mockLogger,
+          retry: { maxAttempts: 3, baseDelayMs: 0 },
+        });
+      }
+
+      const response = {
+        id: "id-1",
+        title: "Test",
+        body: "",
+        source: "api",
+        severity: "info",
+        data: "{}",
+        createdAt: "2026-08-26T00:00:00.000Z",
+      };
+
+      function axiosError(status: number): Error {
+        return Object.assign(new Error(`Request failed ${status}`), {
+          isAxiosError: true,
+          config: { headers: { Authorization: "Bearer super-secret-token" } },
+          response: { status },
+        });
+      }
+
+      it("should not retry by default", async () => {
+        mockPost.mockRejectedValue(axiosError(503));
+        const client = new NotificationsClient({
+          apiEndpoint: "http://localhost/api/notifications",
+          apiToken: "token",
+          logger: mockLogger,
+        });
+
+        await expect(client.send({ title: "Test" })).resolves.toBeNull();
+        expect(mockPost).toHaveBeenCalledTimes(1);
+        expect(mockLogger.warn).not.toHaveBeenCalled();
+      });
+
+      it("should retry transient failures and succeed", async () => {
+        mockPost
+          .mockRejectedValueOnce(axiosError(503))
+          .mockRejectedValueOnce(axiosError(429))
+          .mockResolvedValueOnce({ data: response });
+        const client = createRetryingClient();
+
+        const result = await client.send({ title: "Test" });
+
+        expect(result).toEqual(response);
+        expect(mockPost).toHaveBeenCalledTimes(3);
+        expect(mockLogger.warn).toHaveBeenCalledTimes(2);
+        expect(mockLogger.warn.mock.calls[0][0]).toContain("HTTP 503");
+        expect(mockLogger.warn.mock.calls[1][0]).toContain("HTTP 429");
+        expect(mockLogger.error).not.toHaveBeenCalled();
+      });
+
+      it("should retry network errors without a response", async () => {
+        mockPost
+          .mockRejectedValueOnce(
+            Object.assign(new Error("socket hang up"), {
+              isAxiosError: true,
+            }),
+          )
+          .mockResolvedValueOnce({ data: response });
+        const client = createRetryingClient();
+
+        await expect(client.send({ title: "Test" })).resolves.toEqual(
+          response,
+        );
+        expect(mockPost).toHaveBeenCalledTimes(2);
+      });
+
+      it("should not retry non-retryable 4xx failures", async () => {
+        mockPost.mockRejectedValue(axiosError(400));
+        const client = createRetryingClient();
+
+        await expect(client.send({ title: "Test" })).resolves.toBeNull();
+        expect(mockPost).toHaveBeenCalledTimes(1);
+        expect(mockLogger.warn).not.toHaveBeenCalled();
+      });
+
+      it("should give up after maxAttempts and return null", async () => {
+        mockPost.mockRejectedValue(axiosError(500));
+        const client = createRetryingClient();
+
+        await expect(client.send({ title: "Test" })).resolves.toBeNull();
+        expect(mockPost).toHaveBeenCalledTimes(3);
+        expect(mockLogger.error).toHaveBeenCalledTimes(1);
+      });
+
+      it("should never log the API token in retry warnings", async () => {
+        mockPost
+          .mockRejectedValueOnce(axiosError(503))
+          .mockResolvedValueOnce({ data: response });
+        const client = createRetryingClient();
+
+        await client.send({ title: "Test" });
+
+        const warnings = JSON.stringify(mockLogger.warn.mock.calls);
+        expect(warnings).not.toContain("super-secret-token");
+        expect(warnings).not.toContain("Authorization");
+      });
     });
   });
 

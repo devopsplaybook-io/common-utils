@@ -13,7 +13,31 @@ import {
  */
 export interface SqlDbConfig {
   DATA_DIR: string;
+  /**
+   * Journal mode applied at open (`wal` recommended for concurrent readers).
+   * Empty / absent keeps the SQLite default (`delete`).
+   */
+  DATABASE_SQLITE_JOURNAL_MODE?: string;
+  /**
+   * How long a write waits for a lock before failing
+   * (`busy_timeout`, milliseconds). Absent / 0 keeps the driver default.
+   */
+  DATABASE_SQLITE_BUSY_TIMEOUT_MS?: number;
+  /**
+   * Enable `PRAGMA foreign_keys`. Absent keeps the driver default
+   * (better-sqlite3 enables foreign keys when it opens a database).
+   */
+  DATABASE_SQLITE_FOREIGN_KEYS?: boolean;
 }
+
+const SQLITE_JOURNAL_MODES = [
+  "delete",
+  "truncate",
+  "persist",
+  "memory",
+  "wal",
+  "off",
+];
 
 let database: Database.Database;
 let tracer: StandardTracer;
@@ -75,6 +99,39 @@ export function SqlDbUtilsSetOTel(
 }
 
 /**
+ * Apply optional connection pragmas. Values are validated before
+ * interpolation (PRAGMA does not accept bound parameters in older SQLite
+ * builds), so no configuration value reaches the statement unchecked.
+ */
+function applyPragmas(config: SqlDbConfig): void {
+  if (config.DATABASE_SQLITE_JOURNAL_MODE) {
+    const mode = String(config.DATABASE_SQLITE_JOURNAL_MODE).toLowerCase();
+    if (!SQLITE_JOURNAL_MODES.includes(mode)) {
+      throw new Error(
+        `Invalid DATABASE_SQLITE_JOURNAL_MODE: ${config.DATABASE_SQLITE_JOURNAL_MODE} (expected one of ${SQLITE_JOURNAL_MODES.join(", ")})`,
+      );
+    }
+    database.pragma(`journal_mode = ${mode}`);
+  }
+  const busyTimeoutMs = config.DATABASE_SQLITE_BUSY_TIMEOUT_MS;
+  if (busyTimeoutMs !== undefined && busyTimeoutMs !== null) {
+    if (!Number.isFinite(busyTimeoutMs) || busyTimeoutMs < 0) {
+      throw new Error(
+        `Invalid DATABASE_SQLITE_BUSY_TIMEOUT_MS: ${busyTimeoutMs} (expected a non-negative number)`,
+      );
+    }
+    if (busyTimeoutMs > 0) {
+      database.pragma(`busy_timeout = ${Math.floor(busyTimeoutMs)}`);
+    }
+  }
+  if (config.DATABASE_SQLITE_FOREIGN_KEYS !== undefined) {
+    database.pragma(
+      `foreign_keys = ${config.DATABASE_SQLITE_FOREIGN_KEYS ? "ON" : "OFF"}`,
+    );
+  }
+}
+
+/**
  * Opens the SQLite database and applies pending migration files from `sqlDir`.
  *
  * Migration files must follow the naming convention `init-NNNN.sql` and are
@@ -99,6 +156,7 @@ export async function SqlDbUtilsInit(
   try {
     await fs.ensureDir(config.DATA_DIR);
     database = new Database(`${config.DATA_DIR}/database.db`);
+    applyPragmas(config);
     preparedStatements = new Map();
     SqlDbUtilsExecSQLFile(span, `${sqlDir}/init-0000.sql`);
     const initFiles = (await fs.readdir(sqlDir)).sort();
@@ -114,7 +172,7 @@ export async function SqlDbUtilsInit(
     }
     logger.info(`Current DB Version: ${dbVersionApplied}`, span);
     for (const initFile of initFiles) {
-      const regex = /init-(\d+)\.sql/g;
+      const regex = /^init-(\d+)\.sql$/;
       const match = regex.exec(initFile);
       if (match) {
         const dbVersionInitFile = Number(match[1]);

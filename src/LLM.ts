@@ -1,4 +1,6 @@
 import axios, { AxiosInstance } from "axios";
+import { sanitizeHttpError } from "./HttpError";
+import { HttpRetry, HttpRetryOptions } from "./HttpRetry";
 
 /**
  * A single chat message in OpenAI-compatible format.
@@ -16,6 +18,7 @@ export interface LLMMessage {
  */
 export interface LLMLogger {
   info(message: string): void;
+  warn?(message: string): void;
   error(message: string, err?: unknown): void;
 }
 
@@ -31,6 +34,12 @@ export interface LLMClientConfig {
   model: string;
   /** Request timeout in milliseconds (defaults to 120000) */
   timeoutMs?: number;
+  /**
+   * Optional bounded retry for network errors, HTTP 429 and 5xx responses.
+   * Disabled by default: retrying a completion can duplicate work and
+   * billing on non-idempotent providers.
+   */
+  retry?: HttpRetryOptions;
   /** Optional logger; falls back to console when omitted */
   logger?: LLMLogger;
 }
@@ -65,6 +74,7 @@ export interface LLMResponse {
 /** Console fallback used when no logger is injected. */
 const consoleLogger: LLMLogger = {
   info: (message: string) => console.log(message),
+  warn: (message: string) => console.warn(message),
   error: (message: string, err?: unknown) => console.error(message, err),
 };
 
@@ -82,6 +92,8 @@ const consoleLogger: LLMLogger = {
  *   `isEnabled()` before relying on the client.
  * - Provider errors are rethrown as `Error` with the provider message when
  *   available, so callers get actionable failure reasons.
+ * - `retry` optionally retries transient failures (network errors, HTTP 429
+ *   and 5xx) with exponential backoff; it is disabled by default.
  *
  * @example
  * ```ts
@@ -107,12 +119,14 @@ export class LLMClient {
   private readonly model: string;
   private readonly timeoutMs: number;
   private readonly logger: LLMLogger;
+  private readonly retry: HttpRetryOptions | undefined;
 
   constructor(config: LLMClientConfig) {
     this.enabled = !!(config.apiKey && config.apiUrl && config.model);
     this.model = config.model;
     this.timeoutMs = config.timeoutMs || 120000;
     this.logger = config.logger || consoleLogger;
+    this.retry = config.retry;
 
     if (this.enabled) {
       this.client = axios.create({
@@ -169,10 +183,22 @@ export class LLMClient {
     }
 
     try {
-      const response =
-        options?.timeoutMs !== undefined
-          ? await this.client.post("", body, { timeout: options.timeoutMs })
-          : await this.client.post("", body);
+      const response = await HttpRetry(
+        () =>
+          options?.timeoutMs !== undefined
+            ? this.client!.post("", body, { timeout: options.timeoutMs })
+            : this.client!.post("", body),
+        this.retry,
+        (attempt, delayMs, error) => {
+          const status = (error as { response?: { status?: number } })
+            .response?.status;
+          this.logger.warn?.(
+            `LLMClient: attempt ${attempt} failed${
+              status ? ` (HTTP ${status})` : ""
+            }; retrying in ${delayMs} ms`,
+          );
+        },
+      );
       const choice = response.data?.choices?.[0];
       if (!choice) {
         throw new Error("LLM response has no choices");
@@ -183,7 +209,12 @@ export class LLMClient {
       };
     } catch (err) {
       const message = this.extractErrorMessage(err);
-      this.logger.error(`LLMClient: request failed (${message})`, err);
+      // Never hand the raw AxiosError to the logger: its `config` carries the
+      // Authorization header (and thus the API key).
+      this.logger.error(
+        `LLMClient: request failed (${message})`,
+        sanitizeHttpError(err),
+      );
       throw new Error(message, { cause: err });
     }
   }

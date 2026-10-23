@@ -161,6 +161,47 @@ describe("JWT authentication", () => {
     expect(res.status).not.toHaveBeenCalled();
   });
 
+  it("should accept a case-insensitive Bearer scheme", async () => {
+    const user = makeUser({ role: "user", scopes: ["traces"] });
+    mockedUsersDataGet.mockResolvedValue(user);
+    const jwtToken = await AuthGenerateJWT(user);
+
+    const res = mockRes();
+    await AuthMustBeAuthenticated(mockReq(`bearer ${jwtToken}`), res);
+
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  it("should reject a valid JWT carried by a non-Bearer scheme", async () => {
+    const user = makeUser({ role: "user", scopes: ["traces"] });
+    const jwtToken = await AuthGenerateJWT(user);
+
+    for (const header of [
+      `Basic ${jwtToken}`,
+      `Token ${jwtToken}`,
+      `Bearer:${jwtToken}`,
+    ]) {
+      const res = mockRes();
+      await expectUnauthenticated(
+        AuthMustBeAuthenticated(mockReq(header), res),
+        res,
+      );
+    }
+    expect(mockedGetByHash).not.toHaveBeenCalled();
+  });
+
+  it("should tolerate surrounding whitespace and multiple separators", async () => {
+    const user = makeUser({ role: "user", scopes: ["traces"] });
+    mockedUsersDataGet.mockResolvedValue(user);
+    const jwtToken = await AuthGenerateJWT(user);
+
+    const res = mockRes();
+    // Leading/trailing whitespace and multiple separators are tolerated by
+    // RFC 6750; a credential containing spaces is not.
+    await AuthMustBeAuthenticated(mockReq(`  Bearer  ${jwtToken}  `), res);
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
   it("should reject a request without authorization header", async () => {
     const res = mockRes();
     await expectUnauthenticated(AuthMustBeAuthenticated(mockReq(), res), res);
@@ -286,6 +327,19 @@ describe("API token authentication", () => {
     const res = mockRes();
     await expectUnauthenticated(
       AuthMustBeAuthenticated(mockReq("Bearer expired-api-token"), res),
+      res,
+    );
+    expect(mockedUsersDataGet).not.toHaveBeenCalled();
+  });
+
+  it("should reject an API token whose stored expiry does not parse", async () => {
+    mockedGetByHash.mockResolvedValue(
+      makeToken({ id: "token-bad-expiry", expiresAt: "not-a-date" }),
+    );
+
+    const res = mockRes();
+    await expectUnauthenticated(
+      AuthMustBeAuthenticated(mockReq("Bearer bad-expiry-token"), res),
       res,
     );
     expect(mockedUsersDataGet).not.toHaveBeenCalled();

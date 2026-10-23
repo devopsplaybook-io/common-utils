@@ -1,4 +1,6 @@
 import axios, { AxiosInstance } from "axios";
+import { sanitizeHttpError } from "./HttpError";
+import { HttpRetry, HttpRetryOptions } from "./HttpRetry";
 
 /**
  * Severity levels for notifications.
@@ -23,6 +25,13 @@ export interface NotificationsConfig {
   apiEndpoint: string;
   /** API token used for Bearer authentication */
   apiToken: string;
+  /** Request timeout in milliseconds (defaults to 10000; `0` disables it) */
+  timeoutMs?: number;
+  /**
+   * Optional bounded retry for network errors, HTTP 429 and 5xx responses.
+   * Disabled by default; see {@link HttpRetryOptions}.
+   */
+  retry?: HttpRetryOptions;
   /** Optional logger; falls back to console when omitted */
   logger?: NotificationsLogger;
 }
@@ -74,6 +83,8 @@ const consoleLogger: NotificationsLogger = {
  * - Follow-up `send` calls on a disabled client are silent and resolve to
  *   `null`.
  * - Sending errors are logged and resolve to `null` instead of rejecting.
+ * - `retry` optionally retries transient failures (network errors, HTTP 429
+ *   and 5xx) with exponential backoff; it is disabled by default.
  *
  * @example
  * ```ts
@@ -95,10 +106,12 @@ export class NotificationsClient {
   private client: AxiosInstance | null = null;
   private readonly enabled: boolean;
   private readonly logger: NotificationsLogger;
+  private readonly retry: HttpRetryOptions | undefined;
 
   constructor(config: NotificationsConfig) {
     this.enabled = !!(config.apiEndpoint && config.apiToken);
     this.logger = config.logger || consoleLogger;
+    this.retry = config.retry;
 
     if (this.enabled) {
       this.client = axios.create({
@@ -107,7 +120,12 @@ export class NotificationsClient {
           "Content-Type": "application/json",
           Authorization: `Bearer ${config.apiToken}`,
         },
-        timeout: 10000,
+        timeout:
+          config.timeoutMs !== undefined &&
+          Number.isFinite(config.timeoutMs) &&
+          config.timeoutMs >= 0
+            ? config.timeoutMs
+            : 10000,
       });
       this.logger.info("Notifications integration enabled");
     } else {
@@ -138,18 +156,33 @@ export class NotificationsClient {
     }
 
     try {
-      const response = await this.client.post<NotificationResponse>("/", {
-        title: payload.title,
-        body: payload.body || "",
-        source: payload.source || "api",
-        severity: payload.severity || "info",
-        data: payload.data || "{}",
-      });
+      const response = await HttpRetry(
+        () =>
+          this.client!.post<NotificationResponse>("/", {
+            title: payload.title,
+            body: payload.body || "",
+            source: payload.source || "api",
+            severity: payload.severity || "info",
+            data: payload.data || "{}",
+          }),
+        this.retry,
+        (attempt, delayMs, error) => {
+          const status = (error as { response?: { status?: number } })
+            .response?.status;
+          this.logger.warn(
+            `NotificationsClient: attempt ${attempt} failed${
+              status ? ` (HTTP ${status})` : ""
+            }; retrying in ${delayMs} ms`,
+          );
+        },
+      );
       return response.data;
     } catch (err) {
+      // Never hand the raw AxiosError to the logger: its `config` carries the
+      // Authorization header (and thus the API token).
       this.logger.error(
         "NotificationsClient: failed to send notification",
-        err,
+        sanitizeHttpError(err),
       );
       return null;
     }

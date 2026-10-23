@@ -1,6 +1,6 @@
 {
   "name": "@devopsplaybook.io/common-utils",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Shared utility modules for devopsplaybook.io projects (DB, Config, OTel context, auth/users, notifications, LLM, system helpers)",
   "keywords": [
     "Open Telemetry",
@@ -62,6 +62,10 @@
       "types": "./dist/src/LLM.d.ts",
       "default": "./dist/src/LLM.js"
     },
+    "./http-retry": {
+      "types": "./dist/src/HttpRetry.d.ts",
+      "default": "./dist/src/HttpRetry.js"
+    },
     "./system": {
       "types": "./dist/src/SystemCommand.d.ts",
       "default": "./dist/src/SystemCommand.js"
@@ -75,7 +79,7 @@
     "dist"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.12"
   },
   "scripts": {
     "build": "tsc && tsc -p tsconfig.spec.json --noEmit",

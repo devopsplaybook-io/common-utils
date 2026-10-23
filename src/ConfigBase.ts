@@ -40,6 +40,12 @@ export interface ConfigDatabaseInterface {
   DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS: number;
   /** Per-session `idle_in_transaction_session_timeout` in ms (0 = disabled). */
   DATABASE_POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS: number;
+  /** SQLite journal mode (`wal` recommended for concurrent readers). */
+  DATABASE_SQLITE_JOURNAL_MODE?: string;
+  /** SQLite `busy_timeout` in ms (0 = driver default). */
+  DATABASE_SQLITE_BUSY_TIMEOUT_MS?: number;
+  /** Enable SQLite `PRAGMA foreign_keys` (default on, like better-sqlite3). */
+  DATABASE_SQLITE_FOREIGN_KEYS?: boolean;
 }
 
 /**
@@ -58,6 +64,10 @@ export interface ConfigCommonInterface
   AUTH_RATE_LIMIT_REFRESH_MAX: number;
   /** Rate-limit window in seconds. */
   AUTH_RATE_LIMIT_WINDOW_SECONDS: number;
+  /** Minimum password length (`0` = only non-empty passwords). */
+  PASSWORD_MIN_LENGTH: number;
+  /** Revoke every API token when a user changes their password. */
+  API_TOKENS_REVOKE_ON_PASSWORD_CHANGE: boolean;
   CORS_POLICY_ORIGIN: string;
   DATA_DIR: string;
   JWT_KEY: string;
@@ -71,7 +81,7 @@ export interface ConfigCommonInterface
  * are already typed correctly (config file JSON) pass through unchanged; when
  * the default is a string or there is no default, the value is returned as-is.
  */
-function coerceValue(value: unknown, defaultValue: any): any {
+function coerceValue(value: unknown, defaultValue: any, field: string): any {
   if (typeof value !== "string") {
     return value;
   }
@@ -81,33 +91,41 @@ function coerceValue(value: unknown, defaultValue: any): any {
 
   switch (typeof defaultValue) {
     case "number": {
-      const parsed = Number(value);
-      return Number.isNaN(parsed) ? value : parsed;
+      const trimmed = value.trim();
+      const parsed = Number(trimmed);
+      if (trimmed === "" || !Number.isFinite(parsed)) {
+        throw new Error(
+          `Invalid numeric value for ${field}: "${value}" (a finite number is required)`,
+        );
+      }
+      return parsed;
     }
     case "boolean": {
-      return value === "true" || value === "1" || value === "yes";
+      const normalized = value.trim().toLowerCase();
+      if (["true", "1", "yes"].includes(normalized)) {
+        return true;
+      }
+      if (["false", "0", "no"].includes(normalized)) {
+        return false;
+      }
+      throw new Error(
+        `Invalid boolean value for ${field}: "${value}" (expected true/false, 1/0 or yes/no)`,
+      );
     }
     case "object": {
-      if (Array.isArray(defaultValue)) {
-        try {
-          return JSON.parse(value);
-        } catch {
-          return value;
-        }
+      try {
+        return JSON.parse(value);
+      } catch {
+        throw new Error(`Invalid JSON value for ${field}: "${value}"`);
       }
-      if (defaultValue !== null) {
-        try {
-          return JSON.parse(value);
-        } catch {
-          return value;
-        }
-      }
-      return value;
     }
     default:
       return value;
   }
 }
+
+/** Cached library version; the manifest is read at most once per process. */
+let detectedVersion: string | undefined;
 
 /**
  * Abstract base class for project configuration.
@@ -162,6 +180,10 @@ export abstract class ConfigBase implements ConfigCommonInterface {
   public AUTH_RATE_LIMIT_REFRESH_MAX = 60;
   /** Rate-limit window in seconds. */
   public AUTH_RATE_LIMIT_WINDOW_SECONDS = 60;
+  /** Minimum password length enforced by the auth module. */
+  public PASSWORD_MIN_LENGTH = 0;
+  /** Revoke every API token when a user changes their password. */
+  public API_TOKENS_REVOKE_ON_PASSWORD_CHANGE = false;
   public CORS_POLICY_ORIGIN = "";
   public DATA_DIR = process.env.DATA_DIR || "/data";
   /**
@@ -190,6 +212,19 @@ export abstract class ConfigBase implements ConfigCommonInterface {
    * Postgres pool. `0` (default) disables the timeout.
    */
   public DATABASE_POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS = 0;
+  /**
+   * SQLite journal mode applied at open. Empty keeps the SQLite default
+   * (`delete`); `wal` is recommended when a separate reader may access the
+   * database while the service writes.
+   */
+  public DATABASE_SQLITE_JOURNAL_MODE = "";
+  /**
+   * SQLite `busy_timeout` in ms applied at open. `0` keeps the driver
+   * default (better-sqlite3: 5000 ms).
+   */
+  public DATABASE_SQLITE_BUSY_TIMEOUT_MS = 0;
+  /** Enable SQLite `PRAGMA foreign_keys` (default on, like better-sqlite3). */
+  public DATABASE_SQLITE_FOREIGN_KEYS = true;
 
   /**
    * Fields registered by subclasses (or the base) that {@link reload}
@@ -222,6 +257,8 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       { field: "AUTH_RATE_LIMIT_LOGIN_MAX" },
       { field: "AUTH_RATE_LIMIT_REFRESH_MAX" },
       { field: "AUTH_RATE_LIMIT_WINDOW_SECONDS" },
+      { field: "PASSWORD_MIN_LENGTH" },
+      { field: "API_TOKENS_REVOKE_ON_PASSWORD_CHANGE" },
       { field: "CORS_POLICY_ORIGIN" },
       { field: "DATA_DIR" },
       { field: "JWT_KEY", sensitive: true },
@@ -238,6 +275,9 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       { field: "DATABASE_POSTGRES_DATABASE", envAliases: ["POSTGRES_DB"] },
       { field: "DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS" },
       { field: "DATABASE_POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS" },
+      { field: "DATABASE_SQLITE_JOURNAL_MODE" },
+      { field: "DATABASE_SQLITE_BUSY_TIMEOUT_MS" },
+      { field: "DATABASE_SQLITE_FOREIGN_KEYS" },
       { field: "OPENTELEMETRY_COLLECTOR_HTTP_TRACES" },
       { field: "OPENTELEMETRY_COLLECTOR_HTTP_METRICS" },
       { field: "OPENTELEMETRY_COLLECTOR_HTTP_LOGS" },
@@ -265,6 +305,9 @@ export abstract class ConfigBase implements ConfigCommonInterface {
    * back to `"1"` when neither resolves to this package.
    */
   private static detectVersion(): string {
+    if (detectedVersion !== undefined) {
+      return detectedVersion;
+    }
     for (const candidate of [
       path.resolve(__dirname, "../../package.json"),
       path.resolve(__dirname, "../package.json"),
@@ -272,13 +315,16 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       try {
         const pkg = fse.readJsonSync(candidate);
         if (pkg && pkg.name === "@devopsplaybook.io/common-utils" && pkg.version) {
-          return pkg.version;
+          const version = String(pkg.version);
+          detectedVersion = version;
+          return version;
         }
       } catch {
         // try the next candidate
       }
     }
-    return "1";
+    detectedVersion = "1";
+    return detectedVersion;
   }
 
   /**
@@ -286,6 +332,17 @@ export abstract class ConfigBase implements ConfigCommonInterface {
    * Call this in your subclass constructor for every project-specific field.
    */
   public addConfigField(def: ConfigFieldDef): void {
+    const existing = this._fields.find((entry) => entry.field === def.field);
+    if (existing) {
+      // Re-registering a field (e.g. to add an alias) must never drop the
+      // `sensitive` flag of the base registration and unmask the value in logs.
+      existing.sensitive = existing.sensitive || (def.sensitive ?? false);
+      existing.envAliases = [
+        ...new Set([...existing.envAliases, ...(def.envAliases ?? [])]),
+      ];
+      existing.defaultValue = (this as any)[def.field];
+      return;
+    }
     this._fields.push({
       field: def.field,
       sensitive: def.sensitive ?? false,
@@ -306,9 +363,16 @@ export abstract class ConfigBase implements ConfigCommonInterface {
     let content: Record<string, unknown> = {};
     try {
       content = await fse.readJson(this.CONFIG_FILE);
-      // eslint-disable-next-line no-unused-vars -- catch binding kept so dist/ stays byte-identical to the TS6 build
-    } catch (_e) {
-      // config file is optional – fall back to env + defaults
+    } catch (error) {
+      // A missing file is the normal "env + defaults" configuration. A file
+      // that exists but cannot be read or parsed is almost always a mistake:
+      // surface it instead of silently starting with defaults.
+      const code = (error as { code?: string })?.code;
+      if (code !== "ENOENT") {
+        log(
+          `Configuration file ${this.CONFIG_FILE} could not be read (${(error as Error).message}); using environment and defaults`,
+        );
+      }
     }
 
     log(`Configuration Value: CONFIG_FILE: ${this.CONFIG_FILE}`);
@@ -341,13 +405,13 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       // 3. Apply environment value (full name or alias) if found,
       //    coercing strings to match the default value type
       if (foundValue !== undefined) {
-        (this as any)[field] = coerceValue(foundValue, defaultValue);
+        (this as any)[field] = coerceValue(foundValue, defaultValue, field);
       }
 
       // 4. Config file override (environment always wins, but if neither
       //    environment nor alias matched, check config file)
       if (foundValue === undefined && content[field] !== undefined) {
-        (this as any)[field] = coerceValue(content[field], defaultValue);
+        (this as any)[field] = coerceValue(content[field], defaultValue, field);
         from = "config";
       }
 
