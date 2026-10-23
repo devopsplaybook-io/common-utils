@@ -1,0 +1,228 @@
+name: "Reusable: npm Dependency Audit"
+
+on:
+  workflow_call:
+    inputs:
+      node_app_directories:
+        description: "JSON array of Node.js app directories to audit"
+        required: true
+        type: string
+      node_version:
+        description: "Node.js version to use"
+        required: false
+        type: string
+        default: "22"
+      audit_allowlist_path:
+        description: "Path to the audit allowlist JSON, relative to the repository root"
+        required: false
+        type: string
+        default: ".github/audit-allowlist.json"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(inputs.node_app_directories) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Ensure a lockfile exists
+        run: |
+          if [ ! -f package-lock.json ]; then
+            echo "No package-lock.json in ${PWD}; generating one so the audit can run"
+            npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          fi
+
+      - name: Production audit gate (blocking)
+        env:
+          ALLOWLIST_PATH: ${{ github.workspace }}/${{ inputs.audit_allowlist_path }}
+        run: |
+          npm audit --omit=dev --json > "${RUNNER_TEMP}/audit-prod.json" || true
+          node <<'NODE'
+          const fs = require("fs");
+
+          const today = new Date().toISOString().slice(0, 10);
+          const fail = (message) => {
+            console.log(`::error::${message}`);
+            process.exitCode = 1;
+          };
+
+          const allowlistPath = process.env.ALLOWLIST_PATH;
+          const allEntries = [];
+          let allowlistStatus = "absent";
+          if (allowlistPath && fs.existsSync(allowlistPath)) {
+            allowlistStatus = "invalid";
+            try {
+              const parsed = JSON.parse(fs.readFileSync(allowlistPath, "utf8"));
+              if (!parsed || !Array.isArray(parsed.advisories)) {
+                fail(`Audit allowlist ${allowlistPath} is invalid: it has no advisories array. No exception is applied.`);
+              } else {
+                allEntries.push(...parsed.advisories);
+                allowlistStatus = `loaded (${parsed.advisories.length} entries)`;
+              }
+            } catch (error) {
+              fail(`Audit allowlist ${allowlistPath} is invalid: ${error.message}. No exception is applied.`);
+            }
+          }
+          console.log(`Audit allowlist: ${allowlistStatus}`);
+
+          const usable = [];
+          for (const entry of allEntries) {
+            const valid =
+              entry &&
+              typeof entry.id === "string" &&
+              /^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/i.test(entry.id) &&
+              typeof entry.package === "string" &&
+              entry.package.length > 0 &&
+              (entry.scope === "runtime" || entry.scope === "dev") &&
+              typeof entry.expires === "string" &&
+              /^\d{4}-\d{2}-\d{2}$/.test(entry.expires) &&
+              typeof entry.reason === "string" &&
+              entry.reason.length > 0 &&
+              typeof entry.owner === "string" &&
+              entry.owner.length > 0;
+            if (!valid) {
+              fail(`Audit allowlist entry ${JSON.stringify(entry)} is invalid; it is ignored.`);
+              continue;
+            }
+            if (entry.expires < today) {
+              console.log(`::warning::Audit allowlist entry ${entry.id} (${entry.package}) expired on ${entry.expires}; it no longer suppresses the gate.`);
+              continue;
+            }
+            if (entry.scope !== "runtime") {
+              console.log(`Audit allowlist entry ${entry.id} (${entry.package}) is dev-scope; it does not suppress the production gate.`);
+              continue;
+            }
+            usable.push(entry);
+          }
+
+          let report;
+          try {
+            report = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/audit-prod.json`, "utf8"));
+          } catch (error) {
+            fail(`Could not parse the production audit report: ${error.message}`);
+            process.exit();
+          }
+          if (report.error) {
+            fail(`npm audit failed: ${report.error.summary || report.error.code || JSON.stringify(report.error)}`);
+            process.exit();
+          }
+
+          const offenders = [];
+          for (const [name, vuln] of Object.entries(report.vulnerabilities || {})) {
+            if (vuln.severity !== "high" && vuln.severity !== "critical") continue;
+            const advisories = (vuln.via || []).filter(
+              (via) => via && typeof via === "object" && (via.severity === "high" || via.severity === "critical")
+            );
+            // Entries whose `via` holds only dependency names are aggregates:
+            // the leaf advisory it points at is gated on its own entry.
+            if (advisories.length === 0) continue;
+            const unresolved = [];
+            for (const advisory of advisories) {
+              const match = String(advisory.url || "").match(/GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}/i);
+              const id = match ? match[0] : "";
+              const accepted = id && usable.some(
+                (entry) => entry.id.toLowerCase() === id.toLowerCase() && entry.package === name
+              );
+              if (!accepted) {
+                unresolved.push(`${id || advisory.title || "unknown advisory"} (${advisory.severity})`);
+              }
+            }
+            if (unresolved.length > 0) {
+              offenders.push(`${name}: ${unresolved.join(", ")}`);
+            }
+          }
+
+          if (offenders.length > 0) {
+            fail(`Unallowlisted high/critical production advisories found:\n  - ${offenders.join("\n  - ")}`);
+          } else {
+            console.log("Production audit gate passed: no unallowlisted high or critical production advisories.");
+          }
+          NODE
+
+      - name: Development audit report (informational)
+        if: always()
+        env:
+          ALLOWLIST_PATH: ${{ github.workspace }}/${{ inputs.audit_allowlist_path }}
+        run: |
+          npm audit --json > "${RUNNER_TEMP}/audit-dev.json" || true
+          node <<'NODE'
+          const fs = require("fs");
+
+          const today = new Date().toISOString().slice(0, 10);
+          const allowlistPath = process.env.ALLOWLIST_PATH;
+          const entries = [];
+          if (allowlistPath && fs.existsSync(allowlistPath)) {
+            try {
+              const parsed = JSON.parse(fs.readFileSync(allowlistPath, "utf8"));
+              if (parsed && Array.isArray(parsed.advisories)) entries.push(...parsed.advisories);
+            } catch {
+              // The production gate reports an invalid allowlist; the report stays informational.
+            }
+          }
+
+          let report;
+          try {
+            report = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/audit-dev.json`, "utf8"));
+          } catch (error) {
+            console.log(`::warning::Could not parse the development audit report: ${error.message}`);
+            process.exit(0);
+          }
+          if (report.error) {
+            console.log(`::warning::npm audit failed while producing the development report: ${report.error.summary || report.error.code}`);
+            process.exit(0);
+          }
+
+          const rank = { critical: 0, high: 1, moderate: 2, low: 3, info: 4 };
+          const rows = Object.entries(report.vulnerabilities || {})
+            .filter(([, vuln]) => vuln && vuln.severity)
+            .sort((a, b) => (rank[a[1].severity] ?? 9) - (rank[b[1].severity] ?? 9) || a[0].localeCompare(b[0]))
+            .map(([name, vuln]) => {
+              const advisories = (vuln.via || []).filter((via) => via && typeof via === "object");
+              const details = advisories.map((advisory) => {
+                const match = String(advisory.url || "").match(/GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}/i);
+                const id = match ? match[0] : "unknown";
+                const entry = entries.find(
+                  (candidate) =>
+                    candidate &&
+                    typeof candidate.id === "string" &&
+                    candidate.id.toLowerCase() === id.toLowerCase() &&
+                    candidate.package === name &&
+                    typeof candidate.expires === "string"
+                );
+                if (!entry) return `${id} (not allowlisted)`;
+                if (entry.expires < today) return `${id} (allowlist expired ${entry.expires})`;
+                return `${id} (${entry.scope} allowlist until ${entry.expires})`;
+              });
+              const advisoryCell = details.length > 0 ? details.join("<br>") : "dependency aggregate";
+              return `| ${name} | ${vuln.severity} | ${advisoryCell} |`;
+            });
+
+          const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+          const lines = [
+            "### Development dependency audit (informational)",
+            "",
+            "Production high/critical advisories are gated by the blocking step; this table reports the whole tree, including dev/build-only findings.",
+            "",
+            "| Package | Severity | Advisory |",
+            "| ------- | -------- | -------- |",
+            ...(rows.length > 0 ? rows : ["| - | none | no advisories |"]),
+            "",
+          ];
+          const table = lines.join("\n");
+          if (summaryPath) fs.appendFileSync(summaryPath, `${table}\n`);
+          console.log(table);
+          NODE

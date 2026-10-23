@@ -9,15 +9,25 @@ on:
         type: string
         default: "linux/arm64/v8,linux/amd64"
       node_app_directories:
-        description: "Deprecated and unused. Kept so existing callers stay valid: the merge build runs no build, lint or test."
+        description: "JSON array of Node.js app directories to feed the dependency audit (the merge build itself runs no build, lint or test)"
         required: false
         type: string
         default: ""
       node_version:
-        description: "Deprecated and unused. Kept so existing callers stay valid: the merge build runs no Node.js job."
+        description: "Node.js version used by the dependency audit (the merge build itself runs no Node.js job)"
         required: false
         type: string
         default: "22"
+      audit_enabled:
+        description: "Run the npm dependency audit gate: unallowlisted high/critical production advisories fail, dev advisories are reported"
+        required: false
+        type: boolean
+        default: false
+      audit_allowlist_path:
+        description: "Path to the audit allowlist JSON, relative to the repository root"
+        required: false
+        type: string
+        default: ".github/audit-allowlist.json"
     secrets:
       DOCKER_HUB_USERNAME:
         required: true
@@ -39,6 +49,14 @@ permissions:
   contents: read
 
 jobs:
+  dependency-audit:
+    if: inputs.audit_enabled && inputs.node_app_directories != ''
+    uses: ./.github/workflows/reusable-npm-audit.yml
+    with:
+      node_app_directories: ${{ inputs.node_app_directories }}
+      node_version: ${{ inputs.node_version }}
+      audit_allowlist_path: ${{ inputs.audit_allowlist_path }}
+
   promote-image:
     runs-on: ubuntu-latest
     steps:

@@ -578,6 +578,7 @@ The `.github/workflows/` directory contains **reusable workflows** that other re
 | **NPM Upgrade** | `reusable-npm-upgrade.yml` | `workflow_call` | Runs `npm-check-updates -u`, bumps the patch version, and opens a PR. Supports monorepo sub-folders via `npm_services` input.                                 |
 | **PR Verify**   | `reusable-pr-verify.yml`   | `workflow_call` | Matrix build/lint/test for multiple Node.js apps, plus a multi-platform Docker build pushed as `beta-pr-<PR number>` and `beta`. For monorepos with Docker images. |
 | **Merge Build** | `reusable-merge-build.yml` | `workflow_call` | Promotes the image validated by the merged PR to the `latest`, `beta`, version, major and minor tags. Runs no build, lint or test.                                      |
+| **Dependency Audit** | `reusable-npm-audit.yml` | `workflow_call` | Production dependency audit gate: fails on unallowlisted high/critical runtime advisories and reports dev-only advisories in the job summary. Called by PR Verify and Merge Build when `audit_enabled` is true. |
 
 ### Inputs and Secrets
 
@@ -606,10 +607,12 @@ The `.github/workflows/` directory contains **reusable workflows** that other re
 | Input                  | Required | Default                      | Description                           |
 | ---------------------- | -------- | ---------------------------- | ------------------------------------- |
 | `docker_platforms`     | No       | `linux/arm64/v8,linux/amd64` | Docker build platforms                |
-| `node_app_directories` | No       | `""`                         | JSON array of Node.js app directories |
+| `node_app_directories` | No       | `""`                         | JSON array of Node.js app directories (build/lint/test, and the dependency audit when enabled) |
 | `node_version`         | No       | `"22"`                       | Node.js version                       |
+| `audit_enabled`        | No       | `false`                      | Run the dependency audit gate (see below) |
+| `audit_allowlist_path` | No       | `.github/audit-allowlist.json` | Path to the audit allowlist JSON, relative to the repository root |
 
-`reusable-merge-build` declares the same inputs so existing callers keep working, but it only reads `docker_platforms`, and only on the build fallback path. `node_app_directories` and `node_version` are ignored there because merging runs no Node.js job.
+`reusable-merge-build` declares the same inputs so existing callers keep working. It only reads `docker_platforms` (build fallback path) and the audit inputs (`audit_enabled`, `audit_allowlist_path`, plus `node_app_directories`/`node_version`); it runs no build, lint or test.
 
 | Secret                    | Required | Description                    |
 | ------------------------- | -------- | ------------------------------ |
@@ -619,6 +622,50 @@ The `.github/workflows/` directory contains **reusable workflows** that other re
 | `QUALITY_DASHBOARD_TOKEN` | No       | Quality Dashboard upload token |
 
 `reusable-merge-build` also still declares the Quality Dashboard secrets for backward compatibility, but no longer uploads coverage: each report is produced once, on the pull request.
+
+### Dependency Audit Gate
+
+`reusable-npm-audit.yml` audits every directory in `node_app_directories` with npm's built-in audit (it reads `package-lock.json`, no dependency install is needed). Enable it in either caller workflow:
+
+```yaml
+    with:
+      node_app_directories: '["server","web"]'
+      audit_enabled: true
+      # audit_allowlist_path: ".github/audit-allowlist.json"   # default
+```
+
+- **Blocking:** `npm audit --omit=dev` — every `high` or `critical` advisory affecting production dependencies fails the job, unless an active `runtime` allowlist entry covers it. Aggregate entries (whose `via` lists dependency names only) are not gated directly; the leaf advisory is evaluated on its own entry.
+- **Informational:** the full `npm audit`, including dev/build-only findings, is rendered as a Markdown table in the job summary. It never fails the build.
+- **Opt-in:** `audit_enabled` defaults to `false` so existing consumers with pre-existing advisories are not broken; enable it once their production tree is clean or allowlisted.
+
+#### Audit allowlist
+
+Accepted exceptions live in a JSON file in the consuming repository (default `.github/audit-allowlist.json`):
+
+```json
+{
+  "advisories": [
+    {
+      "id": "GHSA-vfj7-8cjw-p6xm",
+      "package": "braces",
+      "scope": "dev",
+      "reason": "Build-time only (Nuxt/Nitropack); no fixed release",
+      "owner": "DidierHoarau",
+      "expires": "2026-11-21"
+    }
+  ]
+}
+```
+
+| Field              | Rules                                                                                                        |
+| ------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `id`               | GHSA id (`GHSA-xxxx-xxxx-xxxx`); matched together with `package`                                             |
+| `package`          | Package name as reported by npm audit                                                                        |
+| `scope`            | `runtime` entries can suppress the blocking gate; `dev` entries only annotate the informational report       |
+| `reason`, `owner`  | Required free text: why the exception was accepted and who owns it                                            |
+| `expires`          | `YYYY-MM-DD` (UTC). Expired entries never suppress the gate                                                   |
+
+An invalid allowlist file or entry fails the job as a configuration error and never suppresses an advisory. Keep entries time-boxed and review them before the expiry date.
 
 ### Immutable Docker Build Strategy
 
