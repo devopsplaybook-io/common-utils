@@ -39,9 +39,14 @@ src/
   reusable-npm-merge.yml    # Lint + test + build + publish release to npm
   reusable-npm-pr.yml       # Lint + test + build + publish beta tag + comment PR
   reusable-npm-upgrade.yml  # npm-check-updates + auto PR (manual, workflow_call)
-  reusable-pr-verify.yml    # Matrix Node.js + multi-platform Docker build -> beta-pr-<PR> and beta
-  reusable-merge-build.yml  # Promotes the PR image to the version tags on merge (no build/lint/test)
+  reusable-pr-verify.yml    # Matrix Node.js + multi-platform Docker build -> beta-pr-<PR> and beta (+ optional dependency audit)
+  reusable-merge-build.yml  # Promotes the PR image to the version tags on merge (no build/lint/test; optional dependency audit)
+  reusable-npm-audit.yml    # Dependency audit gate: fails on unallowlisted high/critical production advisories, reports dev advisories
 ```
+
+## Dependency Audit
+
+`reusable-npm-audit.yml` is called by `reusable-pr-verify.yml` and `reusable-merge-build.yml` when the caller sets `audit_enabled: true` (default `false`, so existing consumers with pre-existing advisories keep working). It runs `npm audit --omit=dev` per app directory: unallowlisted `high`/`critical` advisories on production dependencies fail the job, while the full audit (dev/build-only findings included) is reported in the job summary. Accepted exceptions live in the consuming repository's `.github/audit-allowlist.json` (`id`, `package`, `scope` `runtime|dev`, `reason`, `owner`, `expires` `YYYY-MM-DD`); only unexpired `runtime` entries suppress the blocking gate. Never silence an advisory by weakening a check: allowlist entries are time-boxed and owned. Optional npm caches are not used in this job because it only reads the lockfile.
 
 ## Weekly Dependency Updates
 

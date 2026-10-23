@@ -18,6 +18,16 @@ on:
         required: false
         type: string
         default: "22"
+      audit_enabled:
+        description: "Run the npm dependency audit gate: unallowlisted high/critical production advisories fail, dev advisories are reported"
+        required: false
+        type: boolean
+        default: false
+      audit_allowlist_path:
+        description: "Path to the audit allowlist JSON, relative to the repository root"
+        required: false
+        type: string
+        default: ".github/audit-allowlist.json"
     secrets:
       DOCKER_HUB_USERNAME:
         required: true
@@ -142,6 +152,15 @@ jobs:
           else
             echo "No coverage/ directory found, skipping upload"
           fi
+
+  dependency-audit:
+    needs: version-check
+    if: inputs.audit_enabled && inputs.node_app_directories != ''
+    uses: ./.github/workflows/reusable-npm-audit.yml
+    with:
+      node_app_directories: ${{ inputs.node_app_directories }}
+      node_version: ${{ inputs.node_version }}
+      audit_allowlist_path: ${{ inputs.audit_allowlist_path }}
 
   docker-build:
     needs: version-check
