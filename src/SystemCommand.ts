@@ -77,11 +77,50 @@ function withCapturedOutput(
 }
 
 /**
+ * Execute an executable without a shell and return both output streams.
+ *
+ * No shell is involved: `command` is run directly and every entry of `args`
+ * is passed to it verbatim, so quotes and shell metacharacters have no
+ * special meaning. This is the safe form for user-controlled values.
+ *
+ * Node.js defaults apply unless overridden through `options`: captured
+ * output is capped at `maxBuffer` (1 MiB) and there is **no timeout**, so an
+ * executable that hangs runs forever. Pass an explicit `timeout` and, for
+ * programs with large output, a larger `maxBuffer`.
+ *
+ * @param command  The executable name or path.
+ * @param args     Literal arguments for the executable.
+ * @param options  Optional `child_process.execFile` options.
+ * @returns Resolves with stdout and stderr on success, rejects on error (the
+ *          error carries the captured stdout/stderr).
+ */
+export function SystemCommandExecFileWithOutput(
+  command: string,
+  args: string[] = [],
+  options?: childProcess.ExecFileOptions,
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    childProcess.execFile(command, args, options || {}, (error, stdout, stderr) => {
+      if (error) {
+        reject(withCapturedOutput(error, stdout, stderr));
+      } else {
+        resolve({ stdout: String(stdout), stderr: String(stderr) });
+      }
+    });
+  });
+}
+
+/**
  * Execute an executable without a shell and return its stdout.
  *
  * No shell is involved: `command` is run directly and every entry of `args`
  * is passed to it verbatim, so quotes and shell metacharacters have no
  * special meaning. This is the safe form for user-controlled values.
+ *
+ * Node.js defaults apply unless overridden through `options`: captured
+ * output is capped at `maxBuffer` (1 MiB) and there is **no timeout**, so an
+ * executable that hangs runs forever. Pass an explicit `timeout` and, for
+ * programs with large output, a larger `maxBuffer`.
  *
  * @param command  The executable name or path.
  * @param args     Literal arguments for the executable.
@@ -94,13 +133,7 @@ export function SystemCommandExecFile(
   args: string[] = [],
   options?: childProcess.ExecFileOptions,
 ): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    childProcess.execFile(command, args, options || {}, (error, stdout, stderr) => {
-      if (error) {
-        reject(withCapturedOutput(error, stdout, stderr));
-      } else {
-        resolve(String(stdout));
-      }
-    });
-  });
+  return SystemCommandExecFileWithOutput(command, args, options).then(
+    (output) => output.stdout,
+  );
 }

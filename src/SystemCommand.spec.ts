@@ -1,5 +1,6 @@
 import {
   SystemCommandExecFile,
+  SystemCommandExecFileWithOutput,
   SystemCommandExecute,
   SystemCommandExecuteWithOutput,
 } from "./SystemCommand";
@@ -52,6 +53,62 @@ describe("SystemCommandExecuteWithOutput", () => {
   it("should reject on command failure", async () => {
     await expect(
       SystemCommandExecuteWithOutput("exit 3"),
+    ).rejects.toThrow();
+  });
+});
+
+describe("SystemCommandExecFileWithOutput", () => {
+  it("should resolve with both stdout and stderr", async () => {
+    const output = await SystemCommandExecFileWithOutput("sh", [
+      "-c",
+      "echo to-out; echo to-err >&2",
+    ]);
+
+    expect(output.stdout.trim()).toBe("to-out");
+    expect(output.stderr.trim()).toBe("to-err");
+  });
+
+  it("should resolve with an empty stderr when nothing is written to it", async () => {
+    const output = await SystemCommandExecFileWithOutput("echo", ["only-out"]);
+
+    expect(output.stdout.trim()).toBe("only-out");
+    expect(output.stderr).toBe("");
+  });
+
+  it("should pass arguments verbatim, without shell interpretation", async () => {
+    const output = await SystemCommandExecFileWithOutput("echo", [
+      "$(whoami)",
+      "; rm -rf /",
+    ]);
+
+    expect(output.stdout.trim()).toBe("$(whoami) ; rm -rf /");
+  });
+
+  it("should surface captured output through the rejection error", async () => {
+    try {
+      await SystemCommandExecFileWithOutput("sh", [
+        "-c",
+        "echo out-details; echo err-details >&2; exit 7",
+      ]);
+      throw new Error("expected rejection");
+    } catch (error) {
+      const execError = error as { stdout?: string; stderr?: string };
+      expect(execError.stdout).toContain("out-details");
+      expect(execError.stderr).toContain("err-details");
+    }
+  });
+
+  it("should reject on non-existent executable", async () => {
+    await expect(
+      SystemCommandExecFileWithOutput("nonexistent_command_xyz_123", []),
+    ).rejects.toThrow();
+  });
+
+  it("should honor an explicit timeout option", async () => {
+    await expect(
+      SystemCommandExecFileWithOutput("sh", ["-c", "sleep 5"], {
+        timeout: 100,
+      }),
     ).rejects.toThrow();
   });
 });

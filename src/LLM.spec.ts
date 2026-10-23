@@ -14,10 +14,12 @@ const mockedCreate = axios.create as jest.MockedFunction<typeof axios.create>;
 /** Logger double that records every call. */
 function createMockLogger(): LLMLogger & {
   info: jest.Mock;
+  warn: jest.Mock;
   error: jest.Mock;
 } {
   return {
     info: jest.fn(),
+    warn: jest.fn(),
     error: jest.fn(),
   };
 }
@@ -346,6 +348,126 @@ describe("LLMClient", () => {
       await expect(
         client.request([{ role: "user", content: "hello" }]),
       ).rejects.toThrow("boom-string");
+    });
+
+    describe("retry", () => {
+      function createRetryingClient(
+        logger: LLMLogger = mockLogger,
+      ): LLMClient {
+        return new LLMClient({
+          apiKey: "key",
+          apiUrl: "https://api.example.com/chat/completions",
+          model: "test-model",
+          logger,
+          retry: { maxAttempts: 3, baseDelayMs: 0 },
+        });
+      }
+
+      const success = {
+        data: {
+          choices: [{ message: { content: "ok" } }],
+          usage: { total_tokens: 1 },
+        },
+      };
+
+      it("should not retry by default", async () => {
+        const axiosError = Object.assign(new Error("Request failed 503"), {
+          isAxiosError: true,
+          response: { status: 503, data: {} },
+        });
+        mockPost.mockRejectedValue(axiosError);
+        const client = createEnabledClient();
+
+        await expect(
+          client.request([{ role: "user", content: "hello" }]),
+        ).rejects.toThrow("Request failed 503");
+        expect(mockPost).toHaveBeenCalledTimes(1);
+        expect(mockLogger.warn).not.toHaveBeenCalled();
+      });
+
+      it("should retry transient 5xx failures and succeed", async () => {
+        const failure = Object.assign(new Error("Request failed 503"), {
+          isAxiosError: true,
+          response: { status: 503, data: {} },
+        });
+        mockPost
+          .mockRejectedValueOnce(failure)
+          .mockRejectedValueOnce(failure)
+          .mockResolvedValueOnce(success);
+        const client = createRetryingClient();
+
+        const response = await client.request([
+          { role: "user", content: "hello" },
+        ]);
+
+        expect(response).toEqual({ content: "ok", totalTokens: 1 });
+        expect(mockPost).toHaveBeenCalledTimes(3);
+        expect(mockLogger.warn).toHaveBeenCalledTimes(2);
+        expect(mockLogger.warn.mock.calls[0][0]).toContain("HTTP 503");
+      });
+
+      it("should retry network errors without a response", async () => {
+        const failure = Object.assign(new Error("socket hang up"), {
+          isAxiosError: true,
+        });
+        mockPost
+          .mockRejectedValueOnce(failure)
+          .mockResolvedValueOnce(success);
+        const client = createRetryingClient();
+
+        await client.request([{ role: "user", content: "hello" }]);
+
+        expect(mockPost).toHaveBeenCalledTimes(2);
+      });
+
+      it("should not retry non-retryable 4xx failures", async () => {
+        const failure = Object.assign(new Error("Request failed 400"), {
+          isAxiosError: true,
+          response: { status: 400, data: { error: { message: "Bad input" } } },
+        });
+        mockPost.mockRejectedValue(failure);
+        const client = createRetryingClient();
+
+        await expect(
+          client.request([{ role: "user", content: "hello" }]),
+        ).rejects.toThrow("Bad input");
+        expect(mockPost).toHaveBeenCalledTimes(1);
+        expect(mockLogger.warn).not.toHaveBeenCalled();
+      });
+
+      it("should give up after maxAttempts", async () => {
+        const failure = Object.assign(new Error("Request failed 500"), {
+          isAxiosError: true,
+          response: { status: 500, data: {} },
+        });
+        mockPost.mockRejectedValue(failure);
+        const client = createRetryingClient();
+
+        await expect(
+          client.request([{ role: "user", content: "hello" }]),
+        ).rejects.toThrow("Request failed 500");
+        expect(mockPost).toHaveBeenCalledTimes(3);
+      });
+
+      it("should work with a logger that has no warn method", async () => {
+        const logger: LLMLogger = {
+          info: jest.fn(),
+          error: jest.fn(),
+        };
+        const failure = Object.assign(new Error("Request failed 500"), {
+          isAxiosError: true,
+          response: { status: 500, data: {} },
+        });
+        mockPost
+          .mockRejectedValueOnce(failure)
+          .mockResolvedValueOnce(success);
+        const client = createRetryingClient(logger);
+
+        await expect(
+          client.request([{ role: "user", content: "hello" }]),
+        ).resolves.toEqual({ content: "ok", totalTokens: 1 });
+        expect(mockPost).toHaveBeenCalledTimes(2);
+      });
     });
   });
 });

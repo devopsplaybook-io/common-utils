@@ -58,6 +58,7 @@ npm install @devopsplaybook.io/common-utils
 | `@devopsplaybook.io/common-utils/users`       | auth/users/routes module                     |
 | `@devopsplaybook.io/common-utils/notifications` | `NotificationsClient`                      |
 | `@devopsplaybook.io/common-utils/llm`         | `LLMClient`                                  |
+| `@devopsplaybook.io/common-utils/http-retry`  | `HttpRetry`                                  |
 | `@devopsplaybook.io/common-utils/system`      | `SystemCommandExecute`                       |
 | `@devopsplaybook.io/common-utils/timeout`     | `TimeoutWait`                                |
 
@@ -382,13 +383,15 @@ await client.send({
 | Export                 | Description                                                       |
 | ---------------------- | ----------------------------------------------------------------- |
 | `NotificationsClient`  | HTTP client with `send` plus `info`/`success`/`warning`/`error` helpers |
-| `NotificationsConfig`  | `{ apiEndpoint, apiToken, logger? }` constructor configuration      |
+| `NotificationsConfig`  | `{ apiEndpoint, apiToken, timeoutMs?, retry?, logger? }` constructor configuration |
 | `NotificationPayload`  | `{ title, body?, source?, severity?, data? }` request payload      |
 | `NotificationResponse` | Shape returned by the notifications API                            |
 | `NotificationSeverity` | `"info" \| "warning" \| "error" \| "success"`                    |
 | `NotificationsLogger` | Minimal logger interface (`info`/`warn`/`error`), console by default |
 
 **Behaviour when not configured**: when `apiEndpoint` or `apiToken` is empty the client logs `"Notifications integration disabled (...)"` once at construction and every `send`/helper call resolves to `null` without logging, so the parent application never fails.
+
+**Timeouts and retries**: requests time out after 10 seconds by default; `timeoutMs` overrides the value and `timeoutMs: 0` disables the timeout (non-finite or negative values fall back to the default). `retry` optionally retries network errors, HTTP 429 and 5xx responses with exponential backoff and full jitter (`{ maxAttempts?, baseDelayMs?, maxDelayMs? }`, see `HttpRetry`); retries are disabled by default and each retry is logged through `logger.warn` without request headers or the API token.
 
 ---
 
@@ -424,13 +427,13 @@ if (llm.isEnabled()) {
 | Export               | Description                                                                |
 | -------------------- | -------------------------------------------------------------------------- |
 | `LLMClient`          | HTTP client with `isEnabled()` and `request(messages, options?)`           |
-| `LLMClientConfig`    | `{ apiKey, apiUrl, model, timeoutMs?, logger? }` constructor configuration |
+| `LLMClientConfig`    | `{ apiKey, apiUrl, model, timeoutMs?, retry?, logger? }` constructor configuration |
 | `LLMMessage`         | `{ role, content }` chat message                                           |
-| `LLMRequestOptions`  | `{ jsonMode?, model? }` per-request overrides                              |
+| `LLMRequestOptions`  | `{ jsonMode?, model?, timeoutMs? }` per-request overrides                  |
 | `LLMResponse`        | `{ content, totalTokens }` normalized response                             |
-| `LLMLogger`          | Minimal logger interface (`info`/`error`), console by default              |
+| `LLMLogger`          | Minimal logger interface (`info`/`error`, optional `warn`), console by default |
 
-**Behaviour details**: requests are sent with `stream: false` and Bearer authentication; the default timeout is 120 seconds (`timeoutMs` overrides it). Provider errors are rethrown as `Error` carrying the provider message when available (e.g., `error.message` from the HTTP response). An empty content is returned as-is — applications that need an empty-content policy (e.g., retry on reasoning models) keep it in their own code.
+**Behaviour details**: requests are sent with `stream: false` and Bearer authentication; the default timeout is 120 seconds (`timeoutMs` overrides it, and `timeoutMs: 0` on a request disables it). Provider errors are rethrown as `Error` carrying the provider message when available (e.g., `error.message` from the HTTP response). An empty content is returned as-is — applications that need an empty-content policy (e.g., retry on reasoning models) keep it in their own code. `retry` optionally retries network errors, HTTP 429 and 5xx responses with exponential backoff; it is disabled by default because retrying a completion can duplicate work and billing (see `HttpRetry`).
 
 ---
 
@@ -525,6 +528,7 @@ import {
   SystemCommandExecute,
   SystemCommandExecuteWithOutput,
   SystemCommandExecFile,
+  SystemCommandExecFileWithOutput,
 } from "@devopsplaybook.io/common-utils";
 
 const output = await SystemCommandExecute("ls -la /tmp", { cwd: "/home" });
@@ -534,6 +538,9 @@ const { stdout, stderr } = await SystemCommandExecuteWithOutput("make build");
 
 // No shell: arguments are passed verbatim (safe for user-controlled values):
 const listing = await SystemCommandExecFile("ls", ["-la", userPath]);
+
+// Same, with both output streams:
+const result = await SystemCommandExecFileWithOutput("ls", ["-la", userPath]);
 ```
 
 | Export                         | Description                                                                  |
@@ -541,8 +548,11 @@ const listing = await SystemCommandExecFile("ls", ["-la", userPath]);
 | `SystemCommandExecute`         | Run a shell command, resolves stdout; on failure the rejection error carries the captured `stdout`/`stderr` |
 | `SystemCommandExecuteWithOutput` | Same, but resolves `{ stdout, stderr }`                                    |
 | `SystemCommandExecFile`        | Run an executable **without a shell** with literal arguments (no metacharacter interpretation), resolves stdout |
+| `SystemCommandExecFileWithOutput` | Same, but resolves `{ stdout, stderr }`                                   |
 
-> **Security**: `SystemCommandExecute` and `SystemCommandExecuteWithOutput` run the command string through a shell — **never interpolate untrusted input** (user input, request payloads, stored values) into it. Use `SystemCommandExecFile` for user-controlled values.
+> **Security**: `SystemCommandExecute` and `SystemCommandExecuteWithOutput` run the command string through a shell — **never interpolate untrusted input** (user input, request payloads, stored values) into it. Use `SystemCommandExecFile` / `SystemCommandExecFileWithOutput` for user-controlled values.
+
+> **Process limits**: the `ExecFile` variants inherit the Node.js defaults: captured output is capped at 1 MiB (`maxBuffer`) and there is **no timeout**, so a hung executable runs forever. Pass explicit `options.timeout` and a larger `options.maxBuffer` when the program may hang or produce large output.
 
 #### `Timeout` -- Promise-based Delay
 
@@ -551,6 +561,29 @@ import { TimeoutWait } from "@devopsplaybook.io/common-utils";
 
 await TimeoutWait(5000); // wait 5 seconds
 ```
+
+`TimeoutWait` rejects with a `RangeError` for non-numeric, non-finite, negative or oversized durations (larger than `TIMEOUT_MAX_DURATION_MS`, the largest delay `setTimeout` accepts); valid durations resolve after the delay, and `0` resolves on the next tick.
+
+#### `HttpRetry` -- Bounded HTTP Retry
+
+Shared retry helper used by the notifications and LLM clients. It retries only transient failures — network/timeout errors (Axios errors without a response), HTTP 429 and 5xx — using exponential backoff with full jitter. Other errors (including 4xx) are rethrown immediately. Retrying is **disabled by default** (`maxAttempts: 1`) because retrying non-idempotent requests (for example an LLM completion) can duplicate work and billing.
+
+```ts
+import { HttpRetry } from "@devopsplaybook.io/common-utils";
+
+const response = await HttpRetry(
+  () => axios.get(url),
+  { maxAttempts: 3, baseDelayMs: 250, maxDelayMs: 10000 },
+  (attempt, delayMs) => logger.warn(`attempt ${attempt} failed; retrying in ${delayMs} ms`),
+);
+```
+
+| Export                       | Description                                                              |
+| ---------------------------- | ------------------------------------------------------------------------ |
+| `HttpRetry`                  | Run an operation with bounded, jittered backoff                          |
+| `HttpRetryOptions`           | `{ maxAttempts?, baseDelayMs?, maxDelayMs? }` (attempts capped at 10)    |
+| `HttpRetryNormalizeOptions`  | Validate and clamp options to their defaults                             |
+| `HttpRetryIsRetryable`       | `true` for network errors, HTTP 429 and 5xx                              |
 
 ### Quick Start
 
