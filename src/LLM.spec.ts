@@ -156,7 +156,17 @@ describe("LLMClient", () => {
         ],
         stream: false,
       });
-      expect(response).toEqual({ content: "hi there", totalTokens: 12 });
+      expect(response).toEqual({
+        content: "hi there",
+        totalTokens: 12,
+        usage: {
+          promptTokens: 0,
+          completionTokens: 0,
+          cachedTokens: 0,
+          totalTokens: 12,
+          model: "test-model",
+        },
+      });
     });
 
     it("should add response_format json_object in jsonMode", async () => {
@@ -265,6 +275,58 @@ describe("LLMClient", () => {
       ]);
 
       expect(response).toEqual({ content: "", totalTokens: 0 });
+    });
+
+    it("should expose the full token usage including cached tokens", async () => {
+      mockPost.mockResolvedValue({
+        data: {
+          choices: [{ message: { content: "ok" } }],
+          usage: {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+            prompt_tokens_details: { cached_tokens: 40 },
+          },
+        },
+      });
+      const client = createEnabledClient();
+
+      const response = await client.request([{ role: "user", content: "hello" }]);
+
+      expect(response.usage).toEqual({
+        promptTokens: 100,
+        completionTokens: 50,
+        cachedTokens: 40,
+        totalTokens: 150,
+        model: "test-model",
+      });
+    });
+
+    it("should leave usage undefined when the provider omits usage", async () => {
+      mockPost.mockResolvedValue({
+        data: { choices: [{ message: { content: "ok" } }] },
+      });
+      const client = createEnabledClient();
+
+      const response = await client.request([{ role: "user", content: "hello" }]);
+
+      expect(response.usage).toBeUndefined();
+    });
+
+    it("should reflect a model override in usage.model", async () => {
+      mockPost.mockResolvedValue({
+        data: {
+          choices: [{ message: { content: "ok" } }],
+          usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+        },
+      });
+      const client = createEnabledClient();
+
+      const response = await client.request([{ role: "user", content: "hello" }], {
+        model: "other-model",
+      });
+
+      expect(response.usage?.model).toBe("other-model");
     });
 
     it("should throw when the response has no choices", async () => {
@@ -400,7 +462,17 @@ describe("LLMClient", () => {
           { role: "user", content: "hello" },
         ]);
 
-        expect(response).toEqual({ content: "ok", totalTokens: 1 });
+        expect(response).toEqual({
+          content: "ok",
+          totalTokens: 1,
+          usage: {
+            promptTokens: 0,
+            completionTokens: 0,
+            cachedTokens: 0,
+            totalTokens: 1,
+            model: "test-model",
+          },
+        });
         expect(mockPost).toHaveBeenCalledTimes(3);
         expect(mockLogger.warn).toHaveBeenCalledTimes(2);
         expect(mockLogger.warn.mock.calls[0][0]).toContain("HTTP 503");
@@ -465,7 +537,17 @@ describe("LLMClient", () => {
 
         await expect(
           client.request([{ role: "user", content: "hello" }]),
-        ).resolves.toEqual({ content: "ok", totalTokens: 1 });
+        ).resolves.toEqual({
+          content: "ok",
+          totalTokens: 1,
+          usage: {
+            promptTokens: 0,
+            completionTokens: 0,
+            cachedTokens: 0,
+            totalTokens: 1,
+            model: "test-model",
+          },
+        });
         expect(mockPost).toHaveBeenCalledTimes(2);
       });
     });
