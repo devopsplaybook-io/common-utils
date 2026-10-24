@@ -62,6 +62,22 @@ export interface LLMRequestOptions {
 }
 
 /**
+ * Token usage reported by the provider for a single completion call.
+ */
+export interface LLMUsage {
+  /** Prompt (input) tokens, cached tokens included */
+  promptTokens: number;
+  /** Completion (output) tokens */
+  completionTokens: number;
+  /** Prompt tokens served from the provider cache (subset of promptTokens) */
+  cachedTokens: number;
+  /** Total tokens billed (prompt + completion) */
+  totalTokens: number;
+  /** Model that actually served the request (after any per-request override) */
+  model: string;
+}
+
+/**
  * Normalized response from a chat completion call.
  */
 export interface LLMResponse {
@@ -69,6 +85,12 @@ export interface LLMResponse {
   content: string;
   /** Total tokens used, as reported by the provider (0 when unavailable) */
   totalTokens: number;
+  /**
+   * Detailed usage when the provider reports one; undefined otherwise.
+   * Callers doing cost metering should treat `usage === undefined` as
+   * "unmetered" rather than guessing the token counts.
+   */
+  usage?: LLMUsage;
 }
 
 /** Console fallback used when no logger is injected. */
@@ -203,9 +225,20 @@ export class LLMClient {
       if (!choice) {
         throw new Error("LLM response has no choices");
       }
+      const providerUsage = response.data?.usage;
+      const usage: LLMUsage | undefined = providerUsage
+        ? {
+            promptTokens: providerUsage.prompt_tokens ?? 0,
+            completionTokens: providerUsage.completion_tokens ?? 0,
+            cachedTokens: providerUsage.prompt_tokens_details?.cached_tokens ?? 0,
+            totalTokens: providerUsage.total_tokens ?? 0,
+            model,
+          }
+        : undefined;
       return {
         content: choice.message?.content || "",
-        totalTokens: response.data?.usage?.total_tokens || 0,
+        totalTokens: providerUsage?.total_tokens || 0,
+        ...(usage ? { usage } : {}),
       };
     } catch (err) {
       const message = this.extractErrorMessage(err);
