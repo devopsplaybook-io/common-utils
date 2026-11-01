@@ -40,6 +40,7 @@ import {
   AuthInit,
   AuthMustBeAdmin,
   AuthMustBeAuthenticated,
+  AuthSessionExpired,
   AuthSetOTel,
 } from "./Auth";
 import { User } from "./User";
@@ -555,6 +556,183 @@ describe("Live authorization", () => {
     expect(session.role).toBe("admin");
     expect(session.userName).toBe("display-name");
   });
+
+  it("should expose display metadata for JWTs and API tokens", async () => {
+    const user = makeUser();
+    mockedUsersDataGet.mockResolvedValue(user);
+
+    const session = await AuthGetUserSession(
+      mockReq(`Bearer ${await AuthGenerateJWT(user)}`),
+    );
+    expect(session.credentialType).toBe("jwt");
+    expect(session.issuedAt).toBeGreaterThan(0);
+    expect(session.expiresAt).toBe((session.issuedAt as number) + 3600);
+    expect(session.sessionStartedAt).toBe(session.issuedAt);
+
+    mockedGetByHash.mockResolvedValue(makeToken({}));
+    const apiSession = await AuthGetUserSession(
+      mockReq("Bearer api-token-session"),
+    );
+    expect(apiSession.credentialType).toBe("api_token");
+    expect(apiSession.issuedAt).toBeUndefined();
+    expect(apiSession.expiresAt).toBeUndefined();
+    expect(apiSession.sessionStartedAt).toBeUndefined();
+  });
+
+  it("should cache an unauthenticated resolution across helper calls", async () => {
+    const req = mockReq();
+    await expect(AuthGetLiveUser(req)).resolves.toBeNull();
+    await expect(AuthGetLiveUser(req)).resolves.toBeNull();
+    expect((await AuthGetUserSession(req)).isAuthenticated).toBe(false);
+
+    expect(mockedUsersDataGet).not.toHaveBeenCalled();
+    expect(mockedGetByHash).not.toHaveBeenCalled();
+  });
+
+  it("should keep accepting a stale tokenVersion when revocation is off", async () => {
+    const user = makeUser({ id: "off-user", tokenVersion: 0 });
+    const jwtToken = await AuthGenerateJWT(user);
+    const liveUser = makeUser({ id: "off-user", tokenVersion: 5 });
+    mockedUsersDataGet.mockResolvedValue(liveUser);
+
+    const req = mockReq(`Bearer ${jwtToken}`);
+    await expect(AuthGetLiveUser(req)).resolves.toBe(liveUser);
+    const session = await AuthGetUserSession(req);
+    expect(session.isAuthenticated).toBe(true);
+  });
+});
+
+describe("JWT claims and session lifetime", () => {
+  const KEY = "mock-uuid-1234";
+
+  function claimsOf(token: string): any {
+    return (jwt.decode(token) as any) ?? {};
+  }
+
+  it("should add iss/aud/jti/iat/sessionStartedAt and a 1 h expiry", async () => {
+    const token = await AuthGenerateJWT(makeUser());
+    const claims = claimsOf(token);
+
+    expect(claims.iss).toBe("devopsplaybook.io");
+    expect(claims.aud).toBe("devopsplaybook.io");
+    expect(typeof claims.jti).toBe("string");
+    expect(claims.jti.length).toBeGreaterThan(0);
+    expect(typeof claims.iat).toBe("number");
+    expect(claims.sessionStartedAt).toBe(claims.iat);
+    expect(claims.exp - claims.iat).toBe(3600);
+  });
+
+  it("should reject a token with a wrong iss or aud", async () => {
+    const user = makeUser();
+    mockedUsersDataGet.mockResolvedValue(user);
+    const base = {
+      exp: Math.floor(Date.now() / 1000) + 60,
+      userId: user.id,
+      role: user.role,
+      scopes: user.scopes,
+      tokenVersion: 0,
+    };
+
+    for (const claims of [
+      { ...base, iss: "evil.example", aud: "devopsplaybook.io" },
+      { ...base, iss: "devopsplaybook.io", aud: "evil.example" },
+      { ...base, iss: "devopsplaybook.io", aud: ["other", "evil"] },
+    ]) {
+      const token = jwt.sign(claims, KEY, { algorithm: "HS256" });
+      const res = mockRes();
+      await expectUnauthenticated(
+        AuthMustBeAuthenticated(mockReq(`Bearer ${token}`), res),
+        res,
+      );
+    }
+  });
+
+  it("should accept legacy tokens without iss/aud and an aud array containing ours", async () => {
+    const user = makeUser({ id: "legacy-user" });
+    mockedUsersDataGet.mockResolvedValue(user);
+    const base = {
+      exp: Math.floor(Date.now() / 1000) + 60,
+      userId: user.id,
+      role: user.role,
+      scopes: user.scopes,
+      tokenVersion: 0,
+    };
+
+    const legacy = jwt.sign(base, KEY, { algorithm: "HS256" });
+    const legit = jwt.sign(
+      {
+        ...base,
+        iss: "devopsplaybook.io",
+        aud: ["devopsplaybook.io", "another-audience"],
+      },
+      KEY,
+      { algorithm: "HS256" },
+    );
+    for (const token of [legacy, legit]) {
+      const res = mockRes();
+      await AuthMustBeAuthenticated(mockReq(`Bearer ${token}`), res);
+      expect(res.status).not.toHaveBeenCalled();
+    }
+  });
+
+  it("should omit iss/aud when the config fields are empty", async () => {
+    await AuthInit(
+      undefined as never,
+      makeConfig({ JWT_ISSUER: "", JWT_AUDIENCE: "" }),
+      APP_SCOPES,
+    );
+    const claims = claimsOf(await AuthGenerateJWT(makeUser()));
+    expect(claims.iss).toBeUndefined();
+    expect(claims.aud).toBeUndefined();
+  });
+
+  it("should cap the expiry at the absolute session lifetime", async () => {
+    await AuthInit(
+      undefined as never,
+      makeConfig({ JWT_SESSION_MAX_DURATION: 60 }),
+      APP_SCOPES,
+    );
+    const now = Math.floor(Date.now() / 1000);
+    const sessionStartedAt = now - 120;
+    const claims = claimsOf(
+      await AuthGenerateJWT(makeUser(), { sessionStartedAt }),
+    );
+    expect(claims.sessionStartedAt).toBe(sessionStartedAt);
+    expect(claims.exp).toBe(sessionStartedAt + 60);
+    expect(claims.exp).toBeLessThanOrEqual(now);
+  });
+
+  it("should report expired absolute sessions and honour the disabled flag", async () => {
+    await AuthInit(
+      undefined as never,
+      makeConfig({ JWT_SESSION_MAX_DURATION: 60 }),
+      APP_SCOPES,
+    );
+    const now = Math.floor(Date.now() / 1000);
+    expect(
+      AuthSessionExpired({ isAuthenticated: true, sessionStartedAt: now - 61 }),
+    ).toBe(true);
+    expect(
+      AuthSessionExpired({ isAuthenticated: true, sessionStartedAt: now - 59 }),
+    ).toBe(false);
+    // Legacy tokens fall back to iat.
+    expect(
+      AuthSessionExpired({ isAuthenticated: true, issuedAt: now - 120 }),
+    ).toBe(true);
+    expect(AuthSessionExpired({ isAuthenticated: true })).toBe(false);
+
+    await AuthInit(
+      undefined as never,
+      makeConfig({ JWT_SESSION_MAX_DURATION: 0 }),
+      APP_SCOPES,
+    );
+    expect(
+      AuthSessionExpired({
+        isAuthenticated: true,
+        sessionStartedAt: now - 1000000,
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("Rate limit defaults", () => {
@@ -637,6 +815,80 @@ describe("JWT revocation (JWT_REVOCATION_ENABLED)", () => {
     const res = mockRes();
     await AuthMustBeAdmin(req, res);
     await AuthGetUserSession(req);
+    expect(res.status).not.toHaveBeenCalled();
+    expect(mockedUsersDataGet).toHaveBeenCalledTimes(1);
+  });
+
+  // Reproduction of the H1 bypass: the rejection was never cached, so the
+  // second live-user read returned the raw (stale) user and guards passed.
+  it("should reject a revoked JWT on repeated live-user reads", async () => {
+    const user = makeUser({ id: "revoke-repeat", tokenVersion: 0 });
+    const jwtToken = await AuthGenerateJWT(user);
+    mockedUsersDataGet.mockResolvedValue(
+      makeUser({ id: "revoke-repeat", tokenVersion: 1 }),
+    );
+
+    const req = mockReq(`Bearer ${jwtToken}`);
+    await expect(AuthGetLiveUser(req)).resolves.toBeNull();
+    await expect(AuthGetLiveUser(req)).resolves.toBeNull();
+
+    expect(mockedUsersDataGet).toHaveBeenCalledTimes(1);
+  });
+
+  it("should reject every guard after session resolution of a revoked JWT", async () => {
+    const user = makeUser({ id: "revoke-session", tokenVersion: 0 });
+    const jwtToken = await AuthGenerateJWT(user);
+    mockedUsersDataGet.mockResolvedValue(
+      makeUser({ id: "revoke-session", tokenVersion: 1 }),
+    );
+
+    const req = mockReq(`Bearer ${jwtToken}`);
+    const session = await AuthGetUserSession(req);
+    expect(session.isAuthenticated).toBe(false);
+
+    for (const guard of [
+      (res: ReturnType<typeof mockRes>) =>
+        AuthMustBeAuthenticated(req, res),
+      (res: ReturnType<typeof mockRes>) => AuthMustBeAdmin(req, res),
+      (res: ReturnType<typeof mockRes>) =>
+        AuthHasScope(req, res, "traces"),
+    ]) {
+      const res = mockRes();
+      await expectUnauthenticated(guard(res), res);
+    }
+
+    expect(mockedUsersDataGet).toHaveBeenCalledTimes(1);
+  });
+
+  it("should reject session resolution after a guard of a revoked JWT", async () => {
+    const user = makeUser({ id: "revoke-reverse", tokenVersion: 0 });
+    const jwtToken = await AuthGenerateJWT(user);
+    mockedUsersDataGet.mockResolvedValue(
+      makeUser({ id: "revoke-reverse", tokenVersion: 1 }),
+    );
+
+    const req = mockReq(`Bearer ${jwtToken}`);
+    const res = mockRes();
+    await expectUnauthenticated(AuthMustBeAdmin(req, res), res);
+
+    const session = await AuthGetUserSession(req);
+    expect(session.isAuthenticated).toBe(false);
+    expect(mockedUsersDataGet).toHaveBeenCalledTimes(1);
+  });
+
+  it("should keep API tokens working and skip the tokenVersion comparison", async () => {
+    mockedGetByHash.mockResolvedValue(makeToken({ id: "api-revocation" }));
+    // The live user has a different (nonzero) tokenVersion: only JWTs carry
+    // the claim, API tokens are re-validated per request instead.
+    mockedUsersDataGet.mockResolvedValue(
+      makeUser({ id: "user-api-revocation", tokenVersion: 9 }),
+    );
+
+    const req = mockReq("Bearer api-token-revocation");
+    const res = mockRes();
+    await AuthMustBeAuthenticated(req, res);
+    await AuthHasScope(req, mockRes(), "traces");
+    expect((await AuthGetUserSession(req)).credentialType).toBe("api_token");
     expect(res.status).not.toHaveBeenCalled();
     expect(mockedUsersDataGet).toHaveBeenCalledTimes(1);
   });

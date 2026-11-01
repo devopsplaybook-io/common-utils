@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from "crypto";
 import { OTelRequestSpan } from "@devopsplaybook.io/otel-utils-fastify";
-import rateLimit from "@fastify/rate-limit";
+import rateLimit, {
+  FastifyRateLimitStoreCtor,
+} from "@fastify/rate-limit";
 import { FastifyInstance, FastifyRequest, RequestGenericInterface } from "fastify";
 import {
   AUTH_ERROR_CODE_FORBIDDEN,
@@ -10,12 +12,15 @@ import {
   AuthGetApiTokensMaxPerUser,
   AuthGetApiTokensRevokeOnPasswordChange,
   AuthGetLiveUser,
+  AuthGetRateLimitLoginIpMax,
   AuthGetRateLimitLoginMax,
   AuthGetRateLimitRefreshMax,
+  AuthGetRateLimitStatusMax,
   AuthGetRateLimitWindowSeconds,
   AuthGetUserSession,
   AuthJwtRevocationEnabled,
   AuthMustBeAdmin,
+  AuthSessionExpired,
 } from "./Auth";
 import { DbUtilsWithLock } from "../DbUtils";
 import { AuthAuditEmit } from "./AuthAudit";
@@ -148,6 +153,30 @@ function sendUnauthenticated(res: any): any {
   });
 }
 
+/** Single 429 body shared by every rate limiter. */
+function rateLimitErrorResponse(
+  _req: FastifyRequest,
+  context: { after: string; statusCode: number },
+) {
+  return {
+    statusCode: context.statusCode,
+    error: "Too Many Requests",
+    code: "RATE_LIMITED",
+    message: `Rate limit exceeded, retry in ${context.after}`,
+  };
+}
+
+/**
+ * Options accepted by {@link UsersRoutes.getRoutes}.
+ *
+ * `rateLimitStore` injects a shared `@fastify/rate-limit` store constructor
+ * (for example a Redis-backed store) so the per-route limits apply across
+ * replicas instead of per process. The default is the in-memory store.
+ */
+export interface UsersRoutesOptions {
+  rateLimitStore?: FastifyRateLimitStoreCtor;
+}
+
 /**
  * Standard user management routes shared across applications:
  * initialization status, login (session), user CRUD and password changes.
@@ -155,12 +184,20 @@ function sendUnauthenticated(res: any): any {
  * Register on a fastify instance:
  * ```ts
  * fastify.register(new UsersRoutes().getRoutes, { prefix: "/api/users" });
+ * // With a shared rate-limit store:
+ * fastify.register(new UsersRoutes().getRoutes, {
+ *   prefix: "/api/users",
+ *   rateLimitStore: MyRedisStore,
+ * });
  * ```
  */
 export class UsersRoutes {
   //
 
-  public async getRoutes(fastify: FastifyInstance): Promise<void> {
+  public async getRoutes(
+    fastify: FastifyInstance,
+    options: UsersRoutesOptions = {},
+  ): Promise<void> {
     //
     // Per-route limits protect the credential endpoints below. The preHandler
     // hook makes the parsed login body available to the key generator.
@@ -168,25 +205,42 @@ export class UsersRoutes {
       await fastify.register(rateLimit, {
         global: false,
         hook: "preHandler",
-        errorResponseBuilder: (
-          _req: FastifyRequest,
-          context: { after: string; statusCode: number },
-        ) => ({
-          statusCode: context.statusCode,
-          error: "Too Many Requests",
-          code: "RATE_LIMITED",
-          message: `Rate limit exceeded, retry in ${context.after}`,
-        }),
+        store: options.rateLimitStore,
+        errorResponseBuilder: rateLimitErrorResponse,
       });
+    } else if (options.rateLimitStore) {
+      // The host own the plugin registration (and therefore the store); an
+      // injected store here would be silently ignored.
+      throw new Error(
+        "UsersRoutes: rateLimitStore cannot be set when @fastify/rate-limit is already registered; configure the store on the host registration instead",
+      );
     }
     const loginMax = AuthGetRateLimitLoginMax();
+    const loginIpMax = AuthGetRateLimitLoginIpMax();
     const refreshMax = AuthGetRateLimitRefreshMax();
+    const statusMax = AuthGetRateLimitStatusMax();
     const rateLimitWindowMs = AuthGetRateLimitWindowSeconds() * 1000;
 
-    fastify.get("/status/initialization", async (req, res) => {
-      const count = await UsersDataCount(OTelRequestSpan(req));
-      return res.status(200).send({ initialized: count > 0 });
-    });
+    fastify.get(
+      "/status/initialization",
+      statusMax > 0
+        ? {
+            config: {
+              rateLimit: {
+                max: statusMax,
+                timeWindow: rateLimitWindowMs,
+                keyGenerator: (req: FastifyRequest) => req.ip,
+              },
+            },
+          }
+        : {},
+      async (req, res) => {
+        // Boolean only (no user count): the bootstrap UI needs to know
+        // whether initialization is required, nothing more.
+        const count = await UsersDataCount(OTelRequestSpan(req));
+        return res.status(200).send({ initialized: count > 0 });
+      },
+    );
 
     // ==================== SESSION (Login) ====================
 
@@ -198,35 +252,57 @@ export class UsersRoutes {
     }
     fastify.post<PostSession>(
       "/session",
-      loginMax > 0
-        ? {
-            config: {
-              rateLimit: {
-                max: loginMax,
-                timeWindow: rateLimitWindowMs,
-                keyGenerator: (req: FastifyRequest) => {
-                  const body = (req.body ?? {}) as { name?: unknown };
-                  return `${req.ip}:${String(body.name ?? "")
-                    .trim()
-                    .toLowerCase()
-                    .slice(0, 255)}`;
+      {
+        ...(loginMax > 0
+          ? {
+              config: {
+                rateLimit: {
+                  max: loginMax,
+                  timeWindow: rateLimitWindowMs,
+                  keyGenerator: (req: FastifyRequest) => {
+                    const body = (req.body ?? {}) as { name?: unknown };
+                    return `${req.ip}:${String(body.name ?? "")
+                      .trim()
+                      .toLowerCase()
+                      .slice(0, 255)}`;
+                  },
                 },
               },
-            },
-          }
-        : {},
+            }
+          : {}),
+        ...(loginIpMax > 0
+          ? {
+              // Optional second, global per-IP limit: the per-username key
+              // above lets an attacker rotate usernames from one address.
+              preHandler: fastify.rateLimit({
+                max: loginIpMax,
+                timeWindow: rateLimitWindowMs,
+                keyGenerator: (req: FastifyRequest) => req.ip,
+                errorResponseBuilder: rateLimitErrorResponse,
+              }),
+            }
+          : {}),
+      },
       async (req, res) => {
         const body = (req.body ?? {}) as Record<string, unknown>;
         let user: User | null;
         // From token
         const userSession = await AuthGetUserSession(req);
         if (userSession.isAuthenticated) {
-          // isAuthenticated implies userId is set
-          user = await UsersDataGet(
-            OTelRequestSpan(req),
-            userSession.userId as string,
-          );
+          // An API token is re-validated on every request: exchanging it for a
+          // standalone JWT would bypass per-request revocation. Clients must
+          // keep using the API token directly.
+          if (userSession.credentialType === "api_token") {
+            return res.status(403).send({
+              error: "Session Token Required",
+              code: AUTH_ERROR_CODE_FORBIDDEN,
+            });
+          }
+          user = await AuthGetLiveUser(req);
           if (!user) {
+            return sendUnauthenticated(res);
+          }
+          if (AuthSessionExpired(userSession)) {
             return sendUnauthenticated(res);
           }
           setNoStoreHeaders(res);
@@ -240,7 +316,10 @@ export class UsersRoutes {
           });
           return res.status(201).send({
             success: true,
-            token: await AuthGenerateJWT(user),
+            token: await AuthGenerateJWT(user, {
+              sessionStartedAt:
+                userSession.sessionStartedAt ?? userSession.issuedAt,
+            }),
             user: user.toTransportJson(),
           });
         }
@@ -324,10 +403,23 @@ export class UsersRoutes {
         if (!user) {
           return sendUnauthenticated(res);
         }
+        const userSession = await AuthGetUserSession(req);
+        if (userSession.credentialType === "api_token") {
+          return res.status(403).send({
+            error: "Session Token Required",
+            code: AUTH_ERROR_CODE_FORBIDDEN,
+          });
+        }
+        if (AuthSessionExpired(userSession)) {
+          return sendUnauthenticated(res);
+        }
         setNoStoreHeaders(res);
         return res.status(201).send({
           success: true,
-          token: await AuthGenerateJWT(user),
+          token: await AuthGenerateJWT(user, {
+            sessionStartedAt:
+              userSession.sessionStartedAt ?? userSession.issuedAt,
+          }),
           user: user.toTransportJson(),
         });
       },
@@ -847,6 +939,7 @@ export class UsersRoutes {
         return sendUnauthenticated(res);
       }
       const apiTokens = await UsersApiTokensDataListByUser(context, user.id);
+      setNoStoreHeaders(res);
       return res
         .status(200)
         .send(apiTokens.map((t) => t.toTransportJson()));

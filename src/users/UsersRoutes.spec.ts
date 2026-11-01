@@ -2,10 +2,17 @@ import * as nodeFs from "fs";
 import * as os from "os";
 import * as path from "path";
 import Fastify, { FastifyInstance } from "fastify";
+import * as jwt from "jsonwebtoken";
 import { StandardLogger, StandardTracer } from "@devopsplaybook.io/otel-utils";
 import { DbUtilsExecSQL, DbUtilsGetDatabase, DbUtilsInit, DbUtilsQuerySQL, DbUtilsSetOTel } from "../DbUtils";
-import { AuthGetUserSession, AuthInit, AuthSetOTel } from "./Auth";
+import {
+  AuthGenerateJWT,
+  AuthGetUserSession,
+  AuthInit,
+  AuthSetOTel,
+} from "./Auth";
 import { AuthAuditEvent, AuthSetAuditHandler } from "./AuthAudit";
+import { User } from "./User";
 import { UsersDataGetByName, UsersDataSetOTel } from "./UsersData";
 import { UsersApiTokensDataSetOTel } from "./UsersApiTokensData";
 import { UsersRoutes } from "./UsersRoutes";
@@ -669,6 +676,31 @@ describe("UsersRoutes: JWT revocation", () => {
     expect(after.statusCode).toBe(401);
     expect(after.json().code).toBe("UNAUTHENTICATED");
 
+    // Repeated requests stay rejected (rejection is not cached across
+    // requests) and every other guard rejects the stale credential too.
+    const again = await app.inject({
+      method: "GET",
+      url: "/api/users/tokens",
+      headers: auth(jwtToken),
+    });
+    expect(again.statusCode).toBe(401);
+
+    const guard = await app.inject({
+      method: "GET",
+      url: "/api/users/",
+      headers: auth(jwtToken),
+    });
+    expect(guard.statusCode).toBe(401);
+    expect(guard.json().code).toBe("UNAUTHENTICATED");
+
+    const refresh = await app.inject({
+      method: "POST",
+      url: "/api/users/session/refresh",
+      headers: auth(jwtToken),
+    });
+    expect(refresh.statusCode).toBe(401);
+    expect(refresh.json().code).toBe("UNAUTHENTICATED");
+
     // The new password still works
     const relogin = await app.inject({
       method: "POST",
@@ -676,6 +708,32 @@ describe("UsersRoutes: JWT revocation", () => {
       payload: { name: "root", password: "new-pass" },
     });
     expect(relogin.statusCode).toBe(201);
+  });
+
+  it("rejects a demoted admin's previously issued JWT on every request", async () => {
+    await initAuth({ JWT_REVOCATION_ENABLED: true });
+    const rootToken = await bootstrapAdmin("root", "root-pass");
+    await createUserViaAdmin(rootToken, "admin2", "admin2-pass", "admin");
+    const admin2Token = await login("admin2", "admin2-pass");
+    const rootId = (await UsersDataGetByName(undefined, "root"))?.id as string;
+
+    const demote = await app.inject({
+      method: "PUT",
+      url: `/api/users/${rootId}`,
+      payload: { role: "user" },
+      headers: auth(admin2Token),
+    });
+    expect(demote.statusCode).toBe(201);
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const denied = await app.inject({
+        method: "GET",
+        url: "/api/users/",
+        headers: auth(rootToken),
+      });
+      expect(denied.statusCode).toBe(401);
+      expect(denied.json().code).toBe("UNAUTHENTICATED");
+    }
   });
 
   it("keeps JWTs valid when revocation is disabled", async () => {
@@ -695,6 +753,181 @@ describe("UsersRoutes: JWT revocation", () => {
       headers: auth(jwtToken),
     });
     expect(stillValid.statusCode).toBe(200);
+  });
+});
+
+describe("UsersRoutes: session lifetime and JWT claims", () => {
+  function claimsOf(token: string): any {
+    return (jwt.decode(token) as any) ?? {};
+  }
+
+  it("renews a valid session preserving sessionStartedAt with new iat/exp/jti", async () => {
+    const token = await bootstrapAdmin("root", "root-pass");
+    const before = claimsOf(token);
+
+    const renewed = await app.inject({
+      method: "POST",
+      url: "/api/users/session",
+      headers: auth(token),
+    });
+    expect(renewed.statusCode).toBe(201);
+    const after = claimsOf(renewed.json().token as string);
+
+    expect(after.sessionStartedAt).toBe(before.sessionStartedAt);
+    expect(after.iat).toBeGreaterThanOrEqual(before.iat);
+    expect(after.exp - after.iat).toBe(3600);
+    expect(after.jti).not.toBe(before.jti);
+    expect(before.iss).toBe("devopsplaybook.io");
+    expect(before.aud).toBe("devopsplaybook.io");
+    expect(typeof before.jti).toBe("string");
+  });
+
+  it("issues a distinct jti per token for the same user", async () => {
+    const first = claimsOf(await bootstrapAdmin("root", "root-pass"));
+    const second = claimsOf(await login("root", "root-pass"));
+    expect(typeof first.jti).toBe("string");
+    expect(typeof second.jti).toBe("string");
+    expect(first.jti).not.toBe(second.jti);
+  });
+
+  it("caps the token expiry at the absolute session lifetime", async () => {
+    await initAuth({ JWT_SESSION_MAX_DURATION: 60 });
+    await bootstrapAdmin("root", "root-pass");
+    const user = (await UsersDataGetByName(undefined, "root")) as User;
+
+    const now = Math.floor(Date.now() / 1000);
+    const sessionStartedAt = now - 120;
+    const capped = await AuthGenerateJWT(user, { sessionStartedAt });
+    const claims = claimsOf(capped);
+    expect(claims.exp).toBe(sessionStartedAt + 60);
+
+    const rejected = await app.inject({
+      method: "GET",
+      url: "/api/users/tokens",
+      headers: auth(capped),
+    });
+    expect(rejected.statusCode).toBe(401);
+  });
+
+  it("rejects renewal of a session past the absolute lifetime", async () => {
+    await bootstrapAdmin("root", "root-pass");
+    const user = (await UsersDataGetByName(undefined, "root")) as User;
+    const key = "test-key";
+    await initAuth({ JWT_KEY: key, JWT_SESSION_MAX_DURATION: 60 });
+
+    const now = Math.floor(Date.now() / 1000);
+    const expiredSession = jwt.sign(
+      {
+        exp: now + 3600,
+        iat: now - 120,
+        sessionStartedAt: now - 120,
+        userId: user.id,
+        userName: user.name,
+        role: user.role,
+        scopes: user.scopes,
+        tokenVersion: user.tokenVersion ?? 0,
+      },
+      key,
+      {
+        algorithm: "HS256",
+        issuer: "devopsplaybook.io",
+        audience: "devopsplaybook.io",
+      },
+    );
+
+    const refresh = await app.inject({
+      method: "POST",
+      url: "/api/users/session/refresh",
+      headers: auth(expiredSession),
+    });
+    expect(refresh.statusCode).toBe(401);
+    expect(refresh.json().code).toBe("UNAUTHENTICATED");
+
+    const existing = await app.inject({
+      method: "POST",
+      url: "/api/users/session",
+      headers: auth(expiredSession),
+    });
+    expect(existing.statusCode).toBe(401);
+    expect(existing.json().code).toBe("UNAUTHENTICATED");
+  });
+
+  it("allows renewal of a long-lived session when the absolute cap is disabled", async () => {
+    await bootstrapAdmin("root", "root-pass");
+    const user = (await UsersDataGetByName(undefined, "root")) as User;
+    const key = "test-key";
+    await initAuth({ JWT_KEY: key, JWT_SESSION_MAX_DURATION: 0 });
+
+    const now = Math.floor(Date.now() / 1000);
+    const longSession = jwt.sign(
+      {
+        exp: now + 3600,
+        iat: now - 120,
+        sessionStartedAt: now - 120,
+        userId: user.id,
+        userName: user.name,
+        role: user.role,
+        scopes: user.scopes,
+        tokenVersion: user.tokenVersion ?? 0,
+      },
+      key,
+      {
+        algorithm: "HS256",
+        issuer: "devopsplaybook.io",
+        audience: "devopsplaybook.io",
+      },
+    );
+
+    const refresh = await app.inject({
+      method: "POST",
+      url: "/api/users/session/refresh",
+      headers: auth(longSession),
+    });
+    expect(refresh.statusCode).toBe(201);
+    expect(claimsOf(refresh.json().token as string).sessionStartedAt).toBe(
+      now - 120,
+    );
+  });
+
+  it("refuses to exchange an API token for a JWT", async () => {
+    const jwtToken = await bootstrapAdmin("root", "root-pass");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/users/tokens",
+      payload: { name: "exchange" },
+      headers: auth(jwtToken),
+    });
+    expect(created.statusCode).toBe(201);
+    const apiToken = created.json().token as string;
+
+    const session = await app.inject({
+      method: "POST",
+      url: "/api/users/session",
+      payload: { name: "root", password: "root-pass" },
+      headers: auth(apiToken),
+    });
+    expect(session.statusCode).toBe(403);
+    expect(session.json().code).toBe("FORBIDDEN");
+    expect(session.json().error).toBe("Session Token Required");
+
+    const refresh = await app.inject({
+      method: "POST",
+      url: "/api/users/session/refresh",
+      headers: auth(apiToken),
+    });
+    expect(refresh.statusCode).toBe(403);
+    expect(refresh.json().code).toBe("FORBIDDEN");
+
+    // The API token keeps authenticating the regular endpoints directly.
+    const listed = await app.inject({
+      method: "GET",
+      url: "/api/users/tokens",
+      headers: auth(apiToken),
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.headers["cache-control"]).toBe("no-store");
+    expect(listed.headers.pragma).toBe("no-cache");
+    expect(listed.headers.vary).toBe("Authorization");
   });
 });
 

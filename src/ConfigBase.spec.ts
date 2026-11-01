@@ -40,8 +40,14 @@ describe("ConfigBase", () => {
     delete process.env.DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS;
     delete process.env.OPENTELEMETRY_COLLECTOR_AWS;
     delete process.env.AUTH_RATE_LIMIT_LOGIN_MAX;
+    delete process.env.AUTH_RATE_LIMIT_LOGIN_IP_MAX;
     delete process.env.AUTH_RATE_LIMIT_REFRESH_MAX;
+    delete process.env.AUTH_RATE_LIMIT_STATUS_MAX;
     delete process.env.AUTH_RATE_LIMIT_WINDOW_SECONDS;
+    delete process.env.JWT_VALIDITY_DURATION;
+    delete process.env.JWT_SESSION_MAX_DURATION;
+    delete process.env.JWT_ISSUER;
+    delete process.env.JWT_AUDIENCE;
     delete process.env.PASSWORD_MIN_LENGTH;
     delete process.env.API_TOKENS_REVOKE_ON_PASSWORD_CHANGE;
     delete process.env.DATABASE_SQLITE_JOURNAL_MODE;
@@ -66,6 +72,34 @@ describe("ConfigBase", () => {
     expect(config.AUTH_RATE_LIMIT_WINDOW_SECONDS).toBe(60);
     expect(config.PASSWORD_MIN_LENGTH).toBe(0);
     expect(config.API_TOKENS_REVOKE_ON_PASSWORD_CHANGE).toBe(false);
+  });
+
+  it("should default the JWT lifetime, claims and extra limits", () => {
+    const config = new TestConfig(configPath);
+    expect(config.JWT_VALIDITY_DURATION).toBe(3600);
+    expect(config.JWT_SESSION_MAX_DURATION).toBe(2592000);
+    expect(config.JWT_ISSUER).toBe("devopsplaybook.io");
+    expect(config.JWT_AUDIENCE).toBe("devopsplaybook.io");
+    expect(config.AUTH_RATE_LIMIT_STATUS_MAX).toBe(60);
+    expect(config.AUTH_RATE_LIMIT_LOGIN_IP_MAX).toBe(0);
+    expect(config.JWT_REVOCATION_ENABLED).toBe(false);
+  });
+
+  it("should load the JWT lifetime, claims and extra limits from the environment", async () => {
+    process.env.JWT_VALIDITY_DURATION = "900";
+    process.env.JWT_SESSION_MAX_DURATION = "0";
+    process.env.JWT_ISSUER = "issuer.example";
+    process.env.JWT_AUDIENCE = "";
+    process.env.AUTH_RATE_LIMIT_STATUS_MAX = "5";
+    process.env.AUTH_RATE_LIMIT_LOGIN_IP_MAX = "3";
+    const config = new TestConfig(configPath);
+    await config.reload();
+    expect(config.JWT_VALIDITY_DURATION).toBe(900);
+    expect(config.JWT_SESSION_MAX_DURATION).toBe(0);
+    expect(config.JWT_ISSUER).toBe("issuer.example");
+    expect(config.JWT_AUDIENCE).toBe("");
+    expect(config.AUTH_RATE_LIMIT_STATUS_MAX).toBe(5);
+    expect(config.AUTH_RATE_LIMIT_LOGIN_IP_MAX).toBe(3);
   });
 
   it("should load the password policy and SQLite pragma settings", async () => {

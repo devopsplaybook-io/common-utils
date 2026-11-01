@@ -66,6 +66,7 @@ The weekly update of the shared npm libraries is agent-driven instead: a Kuberne
 - **No default exports**: All modules use named exports only.
 - **OTel dependency injection**: Every DB module exposes a `*SetOTel(tracer, logger)` function that must be called before `*Init()`. OTel instances are stored as module-level singletons.
 - **Auth modules**: `AuthSetOTel(tracer)` and `UsersDataSetOTel(tracer)` must be called before `AuthInit`. Application scopes are registered through `AuthInit(context, config, allScopes)`; `UsersRoutes` retrieves the request span via `OTelRequestSpan(req)` from `@devopsplaybook.io/otel-utils-fastify` (populated by its Fastify hooks).
+- **Auth request resolution**: `jwtDecodeCached` resolves the credential once per request and caches rejections too (`_jwtResolved` + `_jwtPayload = null`), so a revoked token rejected by one helper cannot authorize a later guard or route handler. `tokenVersion` is compared only when `JWT_REVOCATION_ENABLED` is on; the live user read is shared by all helpers. Access tokens default to 1 h (`JWT_VALIDITY_DURATION`), renewal is bounded by the absolute 30-day `JWT_SESSION_MAX_DURATION` carried in the `sessionStartedAt` claim, and tokens carry `iss`/`aud` (`JWT_ISSUER`/`JWT_AUDIENCE`) plus a random `jti`. API tokens cannot be exchanged for a JWT (`POST /session` / `/session/refresh` answer 403) because they are re-validated per request. Security-sensitive auth changes must cover repeated helper calls and session-then-guard sequences in tests.
 - **ModuleLogger pattern**: `StandardLogger` only exposes `createModuleLogger(name)`. DB modules call `logger.createModuleLogger("ModuleName")` internally. Never call `.info()` or `.error()` directly on a `StandardLogger`.
 - **SQLite-first SQL**: Write SQL with `?` placeholders. The `DbUtils` facade and `DbUtilsNoTelemetry` module auto-convert to `$1, $2, ...` for Postgres via `convertToPostgresPlaceholders()`.
 - **Ids**: Use `crypto.randomUUID()` (UUID v4) — there is no `uuid` dependency. Tests that need deterministic ids replace it with a partial `jest.mock("crypto", () => ({ ...jest.requireActual("crypto"), randomUUID: () => "..." }))`.
@@ -95,7 +96,7 @@ All three commands must pass before committing. The CI pipeline (`reusable-npm-m
 | `fs-extra`                              | Async/sync file operations, `readJson`/`ensureDir`                                         |
 | `bcrypt`                                | Password hashing (users module)                                                            |
 | `jsonwebtoken`                          | JWT signing/verification (auth module)                                                     |
-| `@fastify/rate-limit`                   | Per-route login/refresh throttling registered by `UsersRoutes`                             |
+| `@fastify/rate-limit`                   | Per-route login/refresh/status throttling registered by `UsersRoutes` (in-memory store by default; an optional shared store can be injected through `UsersRoutesOptions.rateLimitStore`) |
 | `fastify`                               | HTTP framework types used by `UsersRoutes`                                                 |
 
 ## Known Gotchas
