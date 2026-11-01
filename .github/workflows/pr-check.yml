@@ -16,6 +16,22 @@ permissions:
   issues: write
 
 jobs:
+  # The reusable workflows are called at `@main` on purpose: pointing the
+  # calls at ./.github/workflows/... would let a pull request execute a
+  # modified copy of the very workflow that gates it. This job lints the
+  # checked-out workflow files instead, so a broken reusable workflow fails
+  # on its PR before it can reach `main` and break every consumer.
+  workflow-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+
+      - name: Lint GitHub Actions workflows
+        run: '"$(go env GOPATH)/bin/actionlint" -color'
+
   npm-pr:
     uses: devopsplaybook-io/common-utils/.github/workflows/reusable-npm-pr.yml@main
     with:

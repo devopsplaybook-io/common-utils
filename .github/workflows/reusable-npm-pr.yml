@@ -163,7 +163,7 @@ jobs:
           PR_NUMBER=${{ github.event.pull_request.number }}
           COMMIT_SHA=${GITHUB_SHA:0:7}
           BETA_VERSION="${CURRENT_VERSION}-beta.${PR_NUMBER}.${COMMIT_SHA}"
-          echo "version=${BETA_VERSION}" >> $GITHUB_OUTPUT
+          echo "version=${BETA_VERSION}" >> "${GITHUB_OUTPUT}"
           echo "Beta version will be: ${BETA_VERSION}"
 
       - name: Update package.json with beta version

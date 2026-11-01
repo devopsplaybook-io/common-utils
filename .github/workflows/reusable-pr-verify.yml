@@ -185,6 +185,7 @@ jobs:
           DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
           DOCKER_PLATFORMS: ${{ inputs.docker_platforms }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -e
           SERVICE_NAME=$(jq -r '.name' package.json)
@@ -198,11 +199,17 @@ jobs:
             PR_TAG="manual-${GITHUB_SHA::7}"
           fi
 
+          # Provenance label read by the merge build before promotion. The PR
+          # head is recorded (not GITHUB_SHA, the synthetic merge commit) so
+          # the merge build can compare it with refs/pull/<N>/head.
+          IMAGE_REVISION="${PR_HEAD_SHA:-${GITHUB_SHA}}"
+
           echo "Building ${IMAGE}:beta-pr-${PR_TAG} and ${IMAGE}:beta"
           docker buildx build \
             --platform "${DOCKER_PLATFORMS}" \
             --push \
             -f Dockerfile \
+            --label "org.opencontainers.image.revision=${IMAGE_REVISION}" \
             -t "${IMAGE}:beta-pr-${PR_TAG}" \
             -t "${IMAGE}:beta" \
             .

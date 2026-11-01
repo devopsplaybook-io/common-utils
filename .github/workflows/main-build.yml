@@ -6,6 +6,12 @@ on:
 
   workflow_dispatch:
 
+# Never cancel an in-flight merge run: two quick merges must publish and
+# promote one after the other, not race each other.
+concurrency:
+  group: main-build
+  cancel-in-progress: false
+
 jobs:
   npm-merge:
     permissions:
