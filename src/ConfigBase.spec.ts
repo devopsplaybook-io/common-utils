@@ -2,10 +2,6 @@ import * as fse from "fs-extra";
 import * as path from "path";
 import * as os from "os";
 
-jest.mock("uuid", () => ({
-  v4: () => "mock-uuid-1234",
-}));
-
 import { ConfigBase } from "./ConfigBase";
 import { DbUtilsInit } from "./DbUtils";
 

@@ -1,7 +1,3 @@
-jest.mock("uuid", () => ({
-  v4: () => "mock-uuid-1234",
-}));
-
 import { User } from "./User";
 import {
   UserPasswordCheckPassword,

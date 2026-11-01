@@ -1,11 +1,6 @@
 // Dedicated suite: the shared UsersRoutes.spec.ts runs with high limits so
 // that its login-heavy flows are not throttled. This suite uses its own
 // Fastify instance, database and low limits.
-jest.mock("uuid", () => {
-  let counter = 0;
-  return { v4: () => `rate-limit-uuid-${++counter}` };
-});
-
 import * as nodeFs from "fs";
 import * as os from "os";
 import * as path from "path";

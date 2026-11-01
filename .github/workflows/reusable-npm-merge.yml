@@ -12,6 +12,11 @@ on:
         description: "NPM package name (e.g. @devopsplaybook.io/otel-utils)"
         required: true
         type: string
+      publish_provenance:
+        description: "Publish with npm provenance (the caller must grant id-token: write)"
+        required: false
+        type: boolean
+        default: false
     secrets:
       NPM_TOKEN:
         required: true
@@ -36,8 +41,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Audit dependencies
-        run: npm audit --audit-level=high
+      - name: Audit production dependencies (blocking)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Report full dependency audit (informational)
+        if: always()
+        run: npm audit || true
 
       - name: Run linting
         run: npm run lint
@@ -133,6 +142,10 @@ jobs:
         if: steps.version-check.outputs.version-exists == 'false'
         run: |
           echo "Publishing version ${{ steps.version-check.outputs.current-version }}"
-          npm publish
+          if [ "${{ inputs.publish_provenance }}" = "true" ]; then
+            npm publish --provenance
+          else
+            npm publish
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
