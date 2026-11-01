@@ -489,10 +489,13 @@ export class UsersRoutes {
         await UserPasswordSetPassword(context, newUser, body.password as string);
         try {
           if (isFirstUser) {
-            // The emptiness check is part of the INSERT: when another request
+            // The route already holds the `users_bootstrap` advisory lock, so
+            // the insert must not take it again. When another request
             // bootstrapped first, this inserts nothing and the caller falls
             // back to the admin-authenticated path.
-            if (!(await UsersDataAddIfEmpty(context, newUser))) {
+            if (
+              !(await UsersDataAddIfEmpty(context, newUser, { lock: false }))
+            ) {
               return null;
             }
           } else {

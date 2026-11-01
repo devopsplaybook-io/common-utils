@@ -154,7 +154,9 @@ await config.reload();
 | `DATABASE_SQLITE_FOREIGN_KEYS`                    | `true`                               | No                                  |
 | All `OPENTELEMETRY_COLLECTOR_*` fields            | Various                              | No (except `_AUTHORIZATION_HEADER`) |
 
-`VERSION` is detected from the library's own `package.json` (correct also for the published layout, read once per process) and can be overridden like any other field via the `VERSION` environment variable or the config file. `SERVICE_ID` can be overridden the same way. Values loaded from the environment or the config file are coerced to the type of the default value (numbers, booleans, arrays), so `"DATABASE_POSTGRES_PORT": "5433"` in `config.json` is applied as the number `5433`. Boolean strings are case-insensitive (`true/false`, `1/0`, `yes/no`); an invalid number, boolean or JSON value rejects `reload()` with an explicit error instead of silently keeping a string or disabling a feature. Re-registering an existing field through `addConfigField` merges aliases and never drops its `sensitive` flag. A config file that exists but cannot be read or parsed is logged (a missing file is normal and stays silent). An unsupported `DATABASE_TYPE` makes `DbUtilsInit` reject with an explicit error.
+`VERSION` is detected from the library's own `package.json` (correct also for the published layout, read once per process) and can be overridden like any other field via the `VERSION` environment variable or the config file. `SERVICE_ID` can be overridden the same way. Values loaded from the environment or the config file are coerced to the type of the default value (numbers, booleans, arrays), so `"DATABASE_POSTGRES_PORT": "5433"` in `config.json` is applied as the number `5433`. Boolean strings are case-insensitive (`true/false`, `1/0`, `yes/no`); an invalid number, boolean or JSON value rejects `reload()` with an explicit error instead of silently keeping a string or disabling a feature. Re-registering an existing field through `addConfigField` merges aliases, never drops its `sensitive` flag, and makes its current value the new default. A config file that exists but cannot be read or parsed is logged (a missing file is normal and stays silent). An unsupported `DATABASE_TYPE` makes `DbUtilsInit` reject with an explicit error.
+
+`reload()` starts every field from its registered default and then overlays the environment and the config file, so a value that disappears (environment variable unset, key removed from `config.json`, or a temporary override reverted) is restored to the default instead of lingering in memory — and the `(from defaults)` log line then reports the actual value and source. Array and object defaults are deep-cloned on every reload, so mutating a live config value never leaks into a later reload.
 
 `JWT_KEY` defaults to an empty string, which means **DB-managed**: `AuthInit` loads the key from `metadata.auth_token` and generates/persists one when absent. A non-empty value from the environment or the config file always takes precedence and is never written to the database (see the auth section for precedence and rotation).
 
@@ -221,12 +223,12 @@ Async (Promise-based) database operations using `pg.Pool`, with OTel tracing.
 | `PostgresDbUtilsExecSQL`           | `(span, sql, params?)`         | Execute write, returns `Promise<number>` |
 | `PostgresDbUtilsQuerySQL`          | `(span, sql, params?, debug?)` | Execute read, returns `Promise<any[]>`   |
 | `PostgresDbUtilsExecSQLFile`       | `(span, filename)`             | Execute an entire SQL file               |
-| `PostgresDbUtilsGetPool`           | `()`                           | Returns the `pg.Pool` instance           |
+| `PostgresDbUtilsGetPool`           | `()`                           | Returns the `pg.Pool` instance; throws before `PostgresDbUtilsInit` |
 | `PostgresDbUtilsTransaction`       | `(span, callback)`             | Run a callback on one client inside `BEGIN`/`COMMIT`, rolling back on error |
-| `PostgresDbUtilsTransactionStart`  | `(span)`                       | **Deprecated** — `BEGIN` on a pooled connection; use `PostgresDbUtilsTransaction` |
-| `PostgresDbUtilsTransactionCommit` | `(span)`                       | **Deprecated** — may commit a different session; use `PostgresDbUtilsTransaction` |
+| `PostgresDbUtilsTransactionStart`  | `(span)`                       | **Deprecated** — `BEGIN` on a pooled connection; warns at call time, removed in 3.0.0 |
+| `PostgresDbUtilsTransactionCommit` | `(span)`                       | **Deprecated** — may commit a different session; warns at call time, removed in 3.0.0 |
 
-Pool defaults: `max: 20`, `idleTimeoutMillis: 30000`, `connectionTimeoutMillis: 10000`. `DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS` and `DATABASE_POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS` set the matching per-session settings on every pool (`0`, the default, keeps them disabled — the historical behaviour). Migrations run inside a transaction and are serialised across replicas with a Postgres advisory lock, so two pods booting at the same time cannot apply the same `init-NNNN.sql` twice. The same migration conventions as SQLite apply (`init-0000.sql` must exist, versions are compared numerically).
+Pool defaults: `max: 20`, `idleTimeoutMillis: 30000`, `connectionTimeoutMillis: 10000`. `DATABASE_POSTGRES_STATEMENT_TIMEOUT_MS` and `DATABASE_POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS` set the matching per-session settings on every pool (`0`, the default, keeps them disabled — the historical behaviour). Migrations run inside a transaction and are serialised across replicas with a Postgres advisory lock, so two pods booting at the same time cannot apply the same `init-NNNN.sql` twice. The same migration conventions as SQLite apply (`init-0000.sql` must exist, versions are compared numerically). `PostgresDbUtilsGetPool()` throws `Postgres pool not initialized; call PostgresDbUtilsInit first` instead of returning `undefined`. The deprecated `PostgresDbUtilsTransactionStart` / `PostgresDbUtilsTransactionCommit` run `BEGIN`/`COMMIT` through the pool and can land on different sessions: they log a warning at call time, are documented as hazardous and will be removed in the next major (3.0.0) — use `PostgresDbUtilsTransaction` instead.
 
 ---
 
@@ -313,8 +315,9 @@ const rows = DbUtilsQuerySQL(span, "SELECT * FROM users WHERE id = ?", [
 | `DbUtilsGetDatabase()`                        | Returns native handle (`Database` or `Pool`) |
 | `DbUtilsGetType()`                            | Returns `"sqlite"` or `"postgres"`           |
 | `convertToPostgresPlaceholders(sql)`          | Converts `?` to `$1, $2, ...`                |
+| `convertToPostgresPlaceholdersCached(sql)`    | Same conversion with a bounded LRU cache     |
 
-`convertToPostgresPlaceholders` rewrites only real placeholder `?` characters: single- and double-quoted literals (with `''` escapes), dollar-quoted strings (`$$…$$`, `$tag$…$tag$`) and `--` / `/* */` comments are skipped. The Postgres jsonb `?` operator is **not** supported — use the function form (`jsonb_exists(column, 'key')`). `DbUtilsInit` rejects an unsupported `DATABASE_TYPE` with an explicit error.
+`convertToPostgresPlaceholders` rewrites only real placeholder `?` characters: single- and double-quoted literals (with `''` escapes), dollar-quoted strings (`$$…$$`, `$tag$…$tag$`) and `--` / `/* */` comments are skipped. E-string literals (`E'…'`, `e'…'`) additionally honour backslash escapes, so `E'it\'s ?'` keeps its `?`; ordinary strings follow `standard_conforming_strings` (a backslash does not escape the closing quote). The Postgres jsonb `?` operator is **not** supported — use the function form (`jsonb_exists(column, 'key')`). `DbUtilsExecSQL`/`DbUtilsQuerySQL` use `convertToPostgresPlaceholdersCached`: conversion runs once per distinct SQL text and the bounded LRU is shared with `DbUtilsNoTelemetry`. `DbUtilsInit` rejects an unsupported `DATABASE_TYPE` with an explicit error.
 
 ---
 
@@ -335,7 +338,7 @@ DbUtilsNoTelemetryExecSQL("INSERT INTO log (msg) VALUES (?)", [message]);
 
 // Batch insert: builds multi-row INSERT
 DbUtilsNoTelemetryBatchInsert(
-  "INTO prices (token, price, ts)", // table + columns
+  "INTO prices (token, price, ts)", // static fragment, never from request data
   3, // number of columns
   [
     ["BTC", 65000, "2024-01-01"],
@@ -351,7 +354,9 @@ DbUtilsNoTelemetryBatchInsert(
 | `DbUtilsNoTelemetryQuerySQL(sql, params?, debug?)`        | Read without spans                |
 | `DbUtilsNoTelemetryBatchInsert(tableCols, numCols, rows)` | Optimized multi-row INSERT        |
 
-Repeated statements are compiled once per connection: prepared statements are cached per SQL string (bounded cache, cleared on re-init), which removes the per-call `prepare` cost on ingestion hot paths. `DbUtilsNoTelemetryBatchInsert` chunks large row sets automatically so the generated statement stays below the driver parameter limit (65535 parameters for Postgres, 32766 for SQLite) instead of failing with an opaque driver error. A chunked batch is atomic: SQLite runs all chunks in one `better-sqlite3` transaction and Postgres runs them on one pooled client inside `BEGIN`/`COMMIT`, so a failure mid-batch inserts **none** of the rows. `?`-to-`$N` conversion results are cached in a bounded LRU on the Postgres path.
+Repeated statements are compiled once per connection: prepared statements are cached per SQL string (bounded cache, cleared on re-init), which removes the per-call `prepare` cost on ingestion hot paths. `DbUtilsNoTelemetryBatchInsert` chunks large row sets automatically so the generated statement stays below the driver parameter limit (65535 parameters for Postgres, 32766 for SQLite) instead of failing with an opaque driver error. A chunked batch is atomic: SQLite runs all chunks in one `better-sqlite3` transaction and Postgres runs them on one pooled client inside `BEGIN`/`COMMIT`, so a failure mid-batch inserts **none** of the rows. `?`-to-`$N` conversion results are cached in the bounded LRU shared with the `DbUtils` facade.
+
+`DbUtilsNoTelemetryBatchInsert`'s `tableCols` argument is interpolated into the generated SQL, so it is a **trusted, static, developer-controlled fragment** (`"INTO table (col1, col2)"`, optionally schema-qualified and with unquoted or double-quoted identifiers): **never** derive it from request data. The function validates that shape (`INTO <table> (<column>, ...)`) and throws on anything else, such as extra statements, comments, a `VALUES` clause or a missing column list. Column values remain parameterised.
 
 ---
 
@@ -456,6 +461,7 @@ import {
 // At startup, after DbUtilsInit:
 AuthSetOTel(otel.OTelTracer());
 UsersDataSetOTel(otel.OTelTracer());
+UsersApiTokensDataSetOTel(otel.OTelTracer(), otel.OTelLogger()); // logger optional
 await AuthInit(span, config, ["traces", "metrics", "logs"]); // app scopes
 
 // Register the standard user routes:
@@ -493,8 +499,9 @@ fastify.register(new UsersRoutes().getRoutes, {
 | `UserPasswordSetPassword` / `UserPasswordCheckPassword` / `UserPasswordCheckPasswordDummy` | bcrypt hashing, verification and the timing-equalizing dummy compare |
 | `UsersDataSetOTel`           | Injects the OTel tracer used by the users data module                  |
 | `UsersData*`                 | Users table CRUD (`Get`, `GetByName`, `List`, `Count`, `CountAdmins`, `Add`, `UpdateUser`, `UpdatePassword`, `Delete`, `BumpTokenVersion`) |
+| `UsersDataAddIfEmpty`        | First-admin bootstrap insert (`(span, user, { lock? })`): serialised by the `users_bootstrap` advisory lock by default, `{ lock: false }` only when the caller already holds it |
 | `isUniqueViolationError`     | Detects unique-constraint violations (SQLite/Postgres)                 |
-| `UsersApiTokensDataSetOTel`  | Injects the OTel tracer used by the API tokens data module             |
+| `UsersApiTokensDataSetOTel`  | Injects the OTel tracer (and optional `StandardLogger`) used by the API tokens data module |
 | `UsersApiTokensData*`        | API tokens table CRUD (`Get`, `GetByTokenHash`, `ListByUser`, `CountByUser`, `Add`, `Delete`, `DeleteByUser`, `SetLastUsed`) |
 | `UsersRoutes`                | Fastify routes: `GET /status/initialization`, `POST /session` (login), `POST /session/refresh` (renew an authenticated session), user CRUD, `PUT /password`, API tokens (`POST/GET /tokens`, `DELETE /tokens/:id`); login/refresh/status are rate limited. `getRoutes(fastify, { rateLimitStore? })` accepts an optional shared rate-limit store |
 | `UsersRoutesOptions`         | `{ rateLimitStore?: FastifyRateLimitStoreCtor }` — inject a shared `@fastify/rate-limit` store |
@@ -536,6 +543,10 @@ The limiter is registered lazily by `UsersRoutes` (`@fastify/rate-limit`, `hook:
 SQL is written SQLite-first; the `DbUtils` facade converts placeholders for Postgres.
 
 **API tokens**: users create their own API tokens via `POST /api/users/tokens` (body `{ name, expiresAt? }`); the plaintext token is returned exactly once and only its SHA-256 hash is stored. An `expiresAt` value that does not parse is rejected at authentication time (fail closed), so a corrupted row can never extend a token indefinitely. Names are limited to 255 characters and each user may hold at most `API_TOKENS_MAX_PER_USER` (default `100`) tokens. `GET /api/users/tokens` lists the caller's tokens and `DELETE /api/users/tokens/:id` revokes one (owner or admin). `expiresAt` must be a future ISO 8601 date and requires the optional `expiresAt` column — creating a token with an expiry before that migration answers 400. `lastUsedAt` is refreshed at most once per hour and requires its optional column (silently skipped otherwise). Requests authenticated with `Authorization: Bearer <api-token>` resolve the owning user's live role and scopes on every request, so role/scope changes apply immediately and revocation is instant; unknown credentials are negatively cached for a short time so a bad-token flood does not hit the database on every request.
+
+**Optional API-token columns**: the `expiresAt` / `lastUsedAt` capability probe runs once per process. A definitive missing-column error (SQLite `no such column`, PostgreSQL SQLSTATE `42703`) caches `false`, so the optional features stay off without breaking authentication. Any other probe failure is logged (when a `StandardLogger` was passed to `UsersApiTokensDataSetOTel(tracer, logger)`) and **not** cached: the next call retries, and the failing caller sees the error. In particular, creating a token with `expiresAt` during a transient probe failure fails loudly instead of silently storing a token without expiry.
+
+**Bootstrap serialisation**: `UsersDataAddIfEmpty(span, user, { lock? })` takes the `users_bootstrap` advisory lock itself by default (a no-op on SQLite, where the single writer serialises). The `POST /` bootstrap route already wraps the whole "no user yet → first admin" sequence in that lock and therefore calls it with `{ lock: false }`; do not call it without that option while already holding the same lock on Postgres, or the second pooled session deadlocks.
 
 **JWT revocation (opt-in)**: `role` and `scopes` are baked into a JWT at signing time, so a token stays valid (default 1 hour, at most the absolute session lifetime) after the user is deleted or their role changes. With `JWT_REVOCATION_ENABLED=true` (default `false`; safe to enable since 2.6.0, planned as the default in a future major) every JWT request re-reads the user and rejects tokens whose `tokenVersion` claim is stale; password changes, role/scope changes and deletion therefore invalidate previously issued JWTs. A rejected token is cached as unauthenticated for the rest of the request, so it cannot authorize any later guard. This requires the `users.tokenVersion` column. JWTs are always verified as HS256 (`algorithms: ["HS256"]` is pinned); the `iss`/`aud` claims are set to `JWT_ISSUER`/`JWT_AUDIENCE` (default `devopsplaybook.io`) and validated when present, and every token gets a random `jti` (reserved for a future denylist). Tokens issued before 2.6.0 without `iss`/`aud` remain accepted until they expire.
 

@@ -744,9 +744,14 @@ export async function PostgresDbUtilsWithAdvisoryLock<T>(
   }
 }
 
-/** Returns the underlying `pg.Pool` instance (undefined before init). */
+/**
+ * Returns the underlying `pg.Pool` instance.
+ *
+ * @throws when called before {@link PostgresDbUtilsInit} ("Postgres pool not
+ * initialized; call PostgresDbUtilsInit first").
+ */
 export function PostgresDbUtilsGetPool(): Pool {
-  return pool as Pool;
+  return requirePool();
 }
 
 /**
@@ -878,12 +883,15 @@ export async function PostgresDbUtilsTransaction<T>(
  * @deprecated `BEGIN` runs on a pooled connection that `COMMIT` may not
  * reuse, so the statements can execute in different sessions. Use
  * {@link PostgresDbUtilsTransaction}, which pins one client for the whole
- * transaction.
+ * transaction. Will be removed in the next major (3.0.0).
  */
 export async function PostgresDbUtilsTransactionStart(
   context: Span | undefined,
 ): Promise<void> {
   const span = tracer.startSpan("PostgresDbUtilsTransactionStart", context);
+  logger?.warn(
+    "PostgresDbUtilsTransactionStart is deprecated: BEGIN may run on a different pooled session than COMMIT and corrupt transaction state; use PostgresDbUtilsTransaction. Removed in 3.0.0.",
+  );
   try {
     await requirePool().query("BEGIN");
   } catch (error) {
@@ -900,12 +908,16 @@ export async function PostgresDbUtilsTransactionStart(
 /**
  * Commit a transaction.
  *
- * @deprecated See {@link PostgresDbUtilsTransactionStart}.
+ * @deprecated See {@link PostgresDbUtilsTransactionStart}. Will be removed
+ * in the next major (3.0.0).
  */
 export async function PostgresDbUtilsTransactionCommit(
   context: Span | undefined,
 ): Promise<void> {
   const span = tracer.startSpan("PostgresDbUtilsTransactionCommit", context);
+  logger?.warn(
+    "PostgresDbUtilsTransactionCommit is deprecated: COMMIT may run on a different pooled session than BEGIN and corrupt transaction state; use PostgresDbUtilsTransaction. Removed in 3.0.0.",
+  );
   try {
     await requirePool().query("COMMIT");
   } catch (error) {

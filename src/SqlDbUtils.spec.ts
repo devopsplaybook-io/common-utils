@@ -214,6 +214,24 @@ describe("SqlDbUtilsExecSQL / SqlDbUtilsQuerySQL", () => {
       typeof (SqlDbUtilsModule.SqlDbUtilsGetDatabase() as any).prepare,
     ).toBe("function");
   });
+
+  it("routes debug SQL through the module logger, not console.log", () => {
+    mockModuleLogger.info.mockClear();
+    const consoleSpy = jest.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      SqlDbUtilsModule.SqlDbUtilsQuerySQL(
+        undefined,
+        "SELECT 1 AS one",
+        [],
+        true,
+      );
+    } finally {
+      consoleSpy.mockRestore();
+    }
+
+    expect(mockModuleLogger.info).toHaveBeenCalledWith("SELECT 1 AS one");
+    expect(consoleSpy).not.toHaveBeenCalled();
+  });
 });
 
 describe("SqlDbUtils span attributes", () => {
@@ -404,6 +422,41 @@ describe("SqlDbUtils prepared statement cache", () => {
       "SELECT COUNT(*) as count FROM applied_log",
     );
     expect(rows[0].count).toBe(1);
+  });
+});
+
+describe("SqlDbUtilsInit re-initialisation", () => {
+  it("closes the previous handle instead of leaking it", async () => {
+    writeMigrations(migrationSet(1));
+    await initDb();
+    const first = SqlDbUtilsModule.SqlDbUtilsGetDatabase();
+
+    // Re-init without closing the first handle manually.
+    await initDb();
+    const second = SqlDbUtilsModule.SqlDbUtilsGetDatabase();
+
+    expect(second).not.toBe(first);
+    expect(first.open).toBe(false);
+    expect(second.open).toBe(true);
+    expect(appliedVersions()).toEqual([1]);
+  });
+
+  it("closes the previous WAL handle on re-init", async () => {
+    writeMigrations(migrationSet(1));
+    await initDb({ DATABASE_SQLITE_JOURNAL_MODE: "wal" });
+    const first = SqlDbUtilsModule.SqlDbUtilsGetDatabase();
+
+    await initDb({ DATABASE_SQLITE_JOURNAL_MODE: "wal" });
+    const second = SqlDbUtilsModule.SqlDbUtilsGetDatabase();
+
+    expect(first.open).toBe(false);
+    expect(second.open).toBe(true);
+    expect(
+      String(
+        second.pragma("journal_mode", { simple: true }),
+      ).toLowerCase(),
+    ).toBe("wal");
+    expect(appliedVersions()).toEqual([1]);
   });
 });
 

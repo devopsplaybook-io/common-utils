@@ -5,6 +5,7 @@ import {
   DbUtilsGetDatabase,
   DbUtilsGetType,
   DbUtilsQuerySQL,
+  DbUtilsWithLock,
   convertToPostgresPlaceholders,
 } from "../DbUtils";
 import { User } from "./User";
@@ -130,8 +131,13 @@ export async function UsersDataAdd(
 
 /**
  * Insert the first administrator only when the `users` table is empty.
- * The condition is part of the INSERT so two concurrent bootstraps cannot
- * both create an admin: the loser inserts 0 rows.
+ *
+ * The insert is serialised by the `users_bootstrap` advisory lock by default:
+ * the SQL condition alone is not safe under PostgreSQL READ COMMITTED, where
+ * two concurrent statements can both observe the empty table. On SQLite the
+ * single writer already serialises the call. Pass `{ lock: false }` only when
+ * the caller already holds that lock on the same connection (otherwise
+ * Postgres deadlocks on a second pooled session).
  *
  * @returns `true` when the user was inserted, `false` when another user
  *          already exists.
@@ -139,17 +145,28 @@ export async function UsersDataAdd(
 export async function UsersDataAddIfEmpty(
   context: Span | undefined,
   user: User,
+  options?: { lock?: boolean },
 ): Promise<boolean> {
   const span = tracer.startSpan("UsersDataAddIfEmpty", context);
   try {
-    const changes = await DbUtilsExecSQL(span, SQL_QUERIES.INSERT_USER_IF_EMPTY, [
-      user.id,
-      user.name,
-      user.passwordEncrypted,
-      user.role,
-      JSON.stringify(user.scopes),
-    ]);
-    return changes > 0;
+    const insert = async () => {
+      const changes = await DbUtilsExecSQL(
+        span,
+        SQL_QUERIES.INSERT_USER_IF_EMPTY,
+        [
+          user.id,
+          user.name,
+          user.passwordEncrypted,
+          user.role,
+          JSON.stringify(user.scopes),
+        ],
+      );
+      return changes > 0;
+    };
+    if (options?.lock === false) {
+      return await insert();
+    }
+    return await DbUtilsWithLock("users_bootstrap", insert, context);
   } finally {
     span.end();
   }

@@ -1,25 +1,37 @@
-import { StandardTracer } from "@devopsplaybook.io/otel-utils";
+import {
+  StandardTracer,
+  StandardLogger,
+  ModuleLogger,
+} from "@devopsplaybook.io/otel-utils";
 import type { Span } from "@opentelemetry/sdk-trace";
 import { DbUtilsExecSQL, DbUtilsQuerySQL } from "../DbUtils";
 import { UserApiToken } from "./UserApiToken";
 
 let tracer: StandardTracer;
+let logger: ModuleLogger | undefined;
 
 /**
  * Whether the optional `expiresAt` / `lastUsedAt` columns exist. Probed once
  * per process so a database that did not run the documented migration never
  * breaks the auth path: one shared in-flight promise is awaited by every
  * caller, so concurrent first calls cannot run the probe twice or observe
- * contradicting results. A failed probe is sticky (`false`).
+ * contradicting results. Only a recognised missing-column error caches
+ * `false`; any other probe failure is logged, not cached, and rethrown so the
+ * next call retries.
  */
 let optionalColumnsProbe: Promise<boolean> | null = null;
 
 /**
- * Injects the OTel tracer instance used by the API tokens data module.
- * Must be called once at startup, before any `UsersApiTokensData*` function.
+ * Injects the OTel tracer (and optional logger) used by the API tokens data
+ * module. Must be called once at startup, before any `UsersApiTokensData*`
+ * function.
  */
-export function UsersApiTokensDataSetOTel(tracerIn: StandardTracer): void {
+export function UsersApiTokensDataSetOTel(
+  tracerIn: StandardTracer,
+  loggerIn?: StandardLogger,
+): void {
   tracer = tracerIn;
+  logger = loggerIn?.createModuleLogger("UsersApiTokensData");
 }
 
 /**
@@ -30,9 +42,30 @@ export async function UsersApiTokensDataSupportsOptionalColumns(
   context: Span | undefined,
 ): Promise<boolean> {
   if (!optionalColumnsProbe) {
-    optionalColumnsProbe = probeOptionalColumns(context);
+    const probe = probeOptionalColumns(context);
+    optionalColumnsProbe = probe;
+    // A transient failure must not stick as "columns missing": clear the
+    // cached promise so the next call re-probes. Callers still see the error.
+    probe.catch(() => {
+      if (optionalColumnsProbe === probe) {
+        optionalColumnsProbe = null;
+      }
+    });
   }
   return optionalColumnsProbe;
+}
+
+/** Whether the error definitively means the probed column does not exist. */
+function isMissingColumnError(error: unknown): boolean {
+  const err = error as { code?: string; message?: string } | undefined;
+  if (err?.code === "42703") {
+    return true;
+  }
+  const message = typeof err?.message === "string" ? err.message : "";
+  return (
+    /no such column/i.test(message) ||
+    /column .+ does not exist/i.test(message)
+  );
 }
 
 async function probeOptionalColumns(
@@ -44,8 +77,15 @@ async function probeOptionalColumns(
       'SELECT "expiresAt" FROM users_api_tokens LIMIT 1',
     );
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (isMissingColumnError(error)) {
+      return false;
+    }
+    logger?.error(
+      "Optional-column probe failed; the next call will retry",
+      error as Error,
+    );
+    throw error;
   }
 }
 
@@ -237,8 +277,9 @@ export async function UsersApiTokensDataDeleteByUser(
 }
 
 /**
- * Record a token's last successful use. Best effort: only attempted when the
- * optional columns exist, and failures never break authentication.
+ * Record a token's last successful use. Best effort: skipped when the
+ * optional columns are recognized as missing. A transient probe or write
+ * failure propagates to the caller (Auth swallows last-used errors).
  */
 export async function UsersApiTokensDataSetLastUsed(
   context: Span | undefined,

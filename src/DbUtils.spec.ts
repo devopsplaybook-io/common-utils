@@ -3,6 +3,7 @@ import {
   DbUtilsInit,
   DbUtilsWithLock,
   convertToPostgresPlaceholders,
+  convertToPostgresPlaceholdersCached,
 } from "./DbUtils";
 import * as PostgresDbUtils from "./PostgresDbUtils";
 
@@ -95,6 +96,57 @@ describe("convertToPostgresPlaceholders", () => {
       "INSERT INTO t (a,b) VALUES ($1, 'const?') RETURNING id -- ?\n, $2",
     );
   });
+
+  it("should honour backslash escapes in E-strings", () => {
+    expect(convertToPostgresPlaceholders("SELECT E'it\\'s ?', ?")).toBe(
+      "SELECT E'it\\'s ?', $1",
+    );
+    expect(convertToPostgresPlaceholders("SELECT e'it\\'s ?', ?")).toBe(
+      "SELECT e'it\\'s ?', $1",
+    );
+  });
+
+  it("should still handle doubled quotes inside E-strings", () => {
+    expect(convertToPostgresPlaceholders("SELECT E'it''s ?', ?")).toBe(
+      "SELECT E'it''s ?', $1",
+    );
+  });
+
+  it("should combine E-strings with dollar quotes and comments", () => {
+    expect(
+      convertToPostgresPlaceholders(
+        "SELECT E'it\\'s ?', $$literal ?$$, /* ? */ ?",
+      ),
+    ).toBe("SELECT E'it\\'s ?', $$literal ?$$, /* ? */ $1");
+  });
+
+  it("should treat backslashes literally in ordinary (non-E) strings", () => {
+    expect(convertToPostgresPlaceholders("SELECT 'a\\', ?")).toBe(
+      "SELECT 'a\\', $1",
+    );
+  });
+
+  it("should not treat an identifier ending in E as an E-string prefix", () => {
+    // SOMEE'...' is not an E-string: the backslash does not escape the quote.
+    expect(convertToPostgresPlaceholders("SELECT SOMEE'a\\', ?")).toBe(
+      "SELECT SOMEE'a\\', $1",
+    );
+  });
+});
+
+describe("convertToPostgresPlaceholdersCached", () => {
+  it("returns the converted SQL for repeated and distinct statements", () => {
+    const repeated = "SELECT * FROM t WHERE a = ? AND b = ?";
+    expect(convertToPostgresPlaceholdersCached(repeated)).toBe(
+      "SELECT * FROM t WHERE a = $1 AND b = $2",
+    );
+    expect(convertToPostgresPlaceholdersCached(repeated)).toBe(
+      "SELECT * FROM t WHERE a = $1 AND b = $2",
+    );
+    expect(
+      convertToPostgresPlaceholdersCached("DELETE FROM t WHERE id = ?"),
+    ).toBe("DELETE FROM t WHERE id = $1");
+  });
 });
 
 describe("DbUtilsInit", () => {
@@ -110,6 +162,59 @@ describe("DbUtilsInit", () => {
 
   it("should default to sqlite before init", () => {
     expect(DbUtilsGetType()).toBe("sqlite");
+  });
+
+  it("converts placeholders for the Postgres exec and query paths", async () => {
+    await jest.isolateModulesAsync(async () => {
+      const dbUtils = require("./DbUtils") as typeof import("./DbUtils");
+      const postgresDbUtils =
+        require("./PostgresDbUtils") as typeof import("./PostgresDbUtils");
+      (postgresDbUtils.PostgresDbUtilsExecSQL as jest.Mock).mockResolvedValue(1);
+      (postgresDbUtils.PostgresDbUtilsQuerySQL as jest.Mock).mockResolvedValue(
+        [],
+      );
+
+      await dbUtils.DbUtilsInit(
+        undefined as never,
+        { DATABASE_TYPE: "postgres" } as never,
+        "/sql",
+      );
+
+      await dbUtils.DbUtilsExecSQL(undefined, "INSERT INTO t (c) VALUES (?)", [
+        "a",
+      ]);
+      await dbUtils.DbUtilsExecSQL(undefined, "INSERT INTO t (c) VALUES (?)", [
+        "b",
+      ]);
+      await dbUtils.DbUtilsQuerySQL(undefined, "SELECT * FROM t WHERE id = ?", [
+        1,
+      ]);
+
+      expect(
+        postgresDbUtils.PostgresDbUtilsExecSQL,
+      ).toHaveBeenNthCalledWith(
+        1,
+        undefined,
+        "INSERT INTO t (c) VALUES ($1)",
+        ["a"],
+      );
+      expect(
+        postgresDbUtils.PostgresDbUtilsExecSQL,
+      ).toHaveBeenNthCalledWith(
+        2,
+        undefined,
+        "INSERT INTO t (c) VALUES ($1)",
+        ["b"],
+      );
+      expect(
+        postgresDbUtils.PostgresDbUtilsQuerySQL,
+      ).toHaveBeenCalledWith(
+        undefined,
+        "SELECT * FROM t WHERE id = $1",
+        [1],
+        false,
+      );
+    });
   });
 });
 
