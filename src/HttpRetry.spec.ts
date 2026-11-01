@@ -4,9 +4,10 @@ import {
   HttpRetryNormalizeOptions,
 } from "./HttpRetry";
 
-function axiosError(status?: number): Error {
+function axiosError(status?: number, code?: string): Error {
   return Object.assign(new Error(status ? `HTTP ${status}` : "network down"), {
     isAxiosError: true,
+    code,
     response: status === undefined ? undefined : { status },
   });
 }
@@ -93,6 +94,13 @@ describe("HttpRetryIsRetryable", () => {
     expect(HttpRetryIsRetryable("boom")).toBe(false);
     expect(HttpRetryIsRetryable(undefined)).toBe(false);
   });
+
+  it("should not retry canceled requests", () => {
+    expect(HttpRetryIsRetryable(axiosError(undefined, "ERR_CANCELED"))).toBe(
+      false,
+    );
+    expect(HttpRetryIsRetryable(axiosError(503, "ERR_CANCELED"))).toBe(false);
+  });
 });
 
 describe("HttpRetry", () => {
@@ -158,6 +166,19 @@ describe("HttpRetry", () => {
       HttpRetry(operation, { maxAttempts: 5, baseDelayMs: 0 }),
     ).rejects.toThrow("plain failure");
     expect(operation).toHaveBeenCalledTimes(1);
+  });
+
+  it("should not retry a request canceled by the caller", async () => {
+    const operation = jest
+      .fn()
+      .mockRejectedValue(axiosError(undefined, "ERR_CANCELED"));
+    const onRetry = jest.fn();
+
+    await expect(
+      HttpRetry(operation, { maxAttempts: 3, baseDelayMs: 0 }, onRetry),
+    ).rejects.toThrow("network down");
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(onRetry).not.toHaveBeenCalled();
   });
 
   it("should apply exponential backoff with jitter", async () => {

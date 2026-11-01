@@ -128,13 +128,13 @@ jobs:
         id: version-check
         run: |
           CURRENT_VERSION=$(node -p "require('./package.json').version")
-          echo "current-version=${CURRENT_VERSION}" >> $GITHUB_OUTPUT
+          echo "current-version=${CURRENT_VERSION}" >> "${GITHUB_OUTPUT}"
 
-          if npm view ${{ inputs.npm_package_name }}@${CURRENT_VERSION} version &> /dev/null; then
-            echo "version-exists=true" >> $GITHUB_OUTPUT
+          if npm view "${{ inputs.npm_package_name }}@${CURRENT_VERSION}" version &> /dev/null; then
+            echo "version-exists=true" >> "${GITHUB_OUTPUT}"
             echo "Version ${CURRENT_VERSION} already exists on npm"
           else
-            echo "version-exists=false" >> $GITHUB_OUTPUT
+            echo "version-exists=false" >> "${GITHUB_OUTPUT}"
             echo "Version ${CURRENT_VERSION} is new, will publish"
           fi
 

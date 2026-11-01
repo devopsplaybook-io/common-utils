@@ -44,6 +44,8 @@ export interface AuthConfig {
   AUTH_RATE_LIMIT_WINDOW_SECONDS?: number;
   /** Minimum password length (defaults to 0: no minimum). */
   PASSWORD_MIN_LENGTH?: number;
+  /** bcrypt cost factor for new hashes (default 10, clamped to 10-15). */
+  BCRYPT_ROUNDS?: number;
   /** Revoke every API token when a password changes (defaults to false). */
   API_TOKENS_REVOKE_ON_PASSWORD_CHANGE?: boolean;
 }
@@ -190,7 +192,10 @@ export async function AuthInit(
 ): Promise<void> {
   config = configIn;
   User.ALL_SCOPES = [...allScopes];
-  UserPasswordSetPolicy({ minLength: configIn.PASSWORD_MIN_LENGTH ?? 0 });
+  UserPasswordSetPolicy({
+    minLength: configIn.PASSWORD_MIN_LENGTH ?? 0,
+    bcryptRounds: configIn.BCRYPT_ROUNDS ?? 10,
+  });
   const span = tracer.startSpan("AuthInit", context);
   try {
     if ((configIn.JWT_KEY ?? "") !== "") {

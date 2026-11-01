@@ -91,11 +91,13 @@ jobs:
           # Preferred: ask the API which PR introduced this commit. This needs
           # `pull-requests: read`, which callers on the default token are not
           # granted, so a failure here is expected rather than exceptional.
-          PR_NUMBER=$(curl -sfL \
+          PR_JSON=$(curl -sfL \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
-            | jq -r '.[0].number // empty' || true)
+            || true)
+          PR_NUMBER=$(printf '%s' "${PR_JSON}" \
+            | jq -r '.[0].number // empty' 2>/dev/null || true)
           if [ -n "${PR_NUMBER}" ]; then
             PR_SOURCE="api"
           fi
@@ -115,15 +117,43 @@ jobs:
             fi
           fi
 
+          # The commit title is author-controlled: only a numeric PR number may
+          # reach a URL or a shell argument.
+          case "${PR_NUMBER}" in
+            '' | *[!0-9]*) PR_NUMBER="" ;;
+          esac
+
+          # Promotion must be provable: the PR image is built from the PR head,
+          # while the merge produces a new commit whose tree is identical for a
+          # squash merge. Accept the candidate only when its revision label
+          # matches refs/pull/<N>/head and that head's tree matches the merged
+          # commit; anything else falls back to a build from GITHUB_SHA.
           SOURCE_IMAGE=""
+          EXPECTED_REVISION=""
+          SOURCE_REVISION=""
           if [ -z "${PR_NUMBER}" ]; then
             echo "::warning::No pull request found for ${GITHUB_SHA}, falling back to a build."
           else
             CANDIDATE="${IMAGE}:beta-pr-${PR_NUMBER}"
-            if docker buildx imagetools inspect "${CANDIDATE}" > /dev/null 2>&1; then
-              SOURCE_IMAGE="${CANDIDATE}"
-            else
+            if ! docker buildx imagetools inspect "${CANDIDATE}" > /dev/null 2>&1; then
               echo "::warning::${CANDIDATE} not found in the registry, falling back to a build."
+            elif ! git fetch --no-tags --depth=1 --force origin "pull/${PR_NUMBER}/head" > /dev/null 2>&1; then
+              echo "::warning::Could not fetch pull/${PR_NUMBER}/head, falling back to a build."
+            else
+              EXPECTED_REVISION=$(git rev-parse FETCH_HEAD)
+              SOURCE_REVISION=$(docker buildx imagetools inspect "${CANDIDATE}" \
+                --format '{{json .Image}}' 2>/dev/null \
+                | jq -r 'if type == "object" and has("config") then (.config.Labels["org.opencontainers.image.revision"]? // empty) elif type == "object" then ([.[] | .config.Labels["org.opencontainers.image.revision"]?] | map(select(. != null)) | first // empty) else empty end' \
+                2>/dev/null || true)
+              if [ -z "${SOURCE_REVISION}" ]; then
+                echo "::warning::${CANDIDATE} has no org.opencontainers.image.revision label, falling back to a build."
+              elif [ "${SOURCE_REVISION}" != "${EXPECTED_REVISION}" ]; then
+                echo "::warning::${CANDIDATE} was built from ${SOURCE_REVISION}, pull/${PR_NUMBER}/head is ${EXPECTED_REVISION}; falling back to a build."
+              elif ! git diff --quiet "${EXPECTED_REVISION}" "${GITHUB_SHA}"; then
+                echo "::warning::${GITHUB_SHA} has a different tree than pull/${PR_NUMBER}/head, falling back to a build."
+              else
+                SOURCE_IMAGE="${CANDIDATE}"
+              fi
             fi
           fi
 
@@ -139,12 +169,15 @@ jobs:
             echo "service_version=${SERVICE_VERSION}"
             echo "pr_number=${PR_NUMBER}"
             echo "pr_source=${PR_SOURCE}"
+            echo "expected_revision=${EXPECTED_REVISION}"
+            echo "source_revision=${SOURCE_REVISION}"
             echo "source_image=${SOURCE_IMAGE}"
             echo "strategy=${STRATEGY}"
           } >> "${GITHUB_OUTPUT}"
 
           echo "Service:  ${SERVICE_NAME} ${SERVICE_VERSION}"
           echo "PR:       ${PR_NUMBER:-none} (resolved via ${PR_SOURCE})"
+          echo "Revision: ${SOURCE_REVISION:-none} (expected ${EXPECTED_REVISION:-unknown})"
           echo "Source:   ${SOURCE_IMAGE:-none}"
           echo "Strategy: ${STRATEGY}"
 
@@ -210,6 +243,7 @@ jobs:
             --platform "${DOCKER_PLATFORMS}" \
             --push \
             -f Dockerfile \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             -t "${RELEASE_IMAGE}:latest" \
             -t "${RELEASE_IMAGE}:${RELEASE_VERSION}" \
             -t "${RELEASE_IMAGE}:${MAJOR}" \

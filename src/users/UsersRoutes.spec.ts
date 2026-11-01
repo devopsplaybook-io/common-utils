@@ -326,6 +326,94 @@ describe("UsersRoutes: malformed bodies answer 400 (not 500)", () => {
   });
 });
 
+describe("UsersRoutes: user name boundary validation", () => {
+  it("trims surrounding whitespace on creation and stores the trimmed name", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/users/",
+      payload: { name: "  alice  ", password: "alice-pass" },
+    });
+
+    expect(created.statusCode).toBe(201);
+    expect(created.json().user.name).toBe("alice");
+    expect(await UsersDataGetByName(undefined, "alice")).toBeDefined();
+    expect(await UsersDataGetByName(undefined, "  alice  ")).toBeNull();
+
+    // The same normalization applies on login.
+    const loggedIn = await app.inject({
+      method: "POST",
+      url: "/api/users/session",
+      payload: { name: " alice ", password: "alice-pass" },
+    });
+    expect(loggedIn.statusCode).toBe(201);
+    expect(loggedIn.json().user.name).toBe("alice");
+  });
+
+  it.each([[""], ["   "]])(
+    "rejects the empty or whitespace-only name %p",
+    async (name) => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/users/",
+        payload: { name, password: "alice-pass" },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe("Missing: Name");
+    },
+  );
+
+  it("accepts a 64-character name", async () => {
+    const max = "a".repeat(64);
+    const accepted = await app.inject({
+      method: "POST",
+      url: "/api/users/",
+      payload: { name: max, password: "alice-pass" },
+    });
+    expect(accepted.statusCode).toBe(201);
+    expect(accepted.json().user.name).toBe(max);
+  });
+
+  it("rejects a 65-character name", async () => {
+    const adminToken = await bootstrapAdmin();
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/api/users/",
+      payload: { name: "a".repeat(65), password: "alice-pass" },
+      headers: auth(adminToken),
+    });
+    expect(rejected.statusCode).toBe(400);
+    expect(rejected.json().error).toContain("Name Too Long");
+  });
+
+  it.each([["bad name"], ["a/b"], ["<script>"], ["-lead"], ["trail-"]])(
+    "rejects the name %p outside the accepted charset",
+    async (name) => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/users/",
+        payload: { name, password: "alice-pass" },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe("Invalid: Name");
+    },
+  );
+
+  it("applies the same validation on login", async () => {
+    await bootstrapAdmin("root", "root-pass");
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/users/session",
+      payload: { name: "bad name", password: "root-pass" },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("Invalid: Name");
+  });
+});
+
 describe("UsersRoutes: last-admin guard", () => {
   it("prevents the last admin from demoting themselves", async () => {
     const adminToken = await bootstrapAdmin("root", "root-pass");

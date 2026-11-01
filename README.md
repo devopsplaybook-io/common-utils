@@ -136,6 +136,7 @@ await config.reload();
 | `AUTH_RATE_LIMIT_STATUS_MAX`                      | `60` (`<= 0` disables)               | No                                  |
 | `AUTH_RATE_LIMIT_WINDOW_SECONDS`                  | `60`                                 | No                                  |
 | `PASSWORD_MIN_LENGTH`                             | `0` (non-empty only)                 | No                                  |
+| `BCRYPT_ROUNDS`                                   | `10` (clamped to 10-15)              | No                                  |
 | `API_TOKENS_REVOKE_ON_PASSWORD_CHANGE`            | `false`                              | No                                  |
 | `CORS_POLICY_ORIGIN`                              | `""`                                 | No                                  |
 | `DATA_DIR`                                        | `/data`                              | No                                  |
@@ -442,7 +443,7 @@ if (llm.isEnabled()) {
 | `LLMResponse`        | `{ content, totalTokens }` normalized response                             |
 | `LLMLogger`          | Minimal logger interface (`info`/`error`, optional `warn`), console by default |
 
-**Behaviour details**: requests are sent with `stream: false` and Bearer authentication; the default timeout is 120 seconds (`timeoutMs` overrides it, and `timeoutMs: 0` on a request disables it). Provider errors are rethrown as `Error` carrying the provider message when available (e.g., `error.message` from the HTTP response). An empty content is returned as-is — applications that need an empty-content policy (e.g., retry on reasoning models) keep it in their own code. `retry` optionally retries network errors, HTTP 429 and 5xx responses with exponential backoff; it is disabled by default because retrying a completion can duplicate work and billing (see `HttpRetry`).
+**Behaviour details**: requests are sent with `stream: false` and Bearer authentication; the default timeout is 120 seconds. `timeoutMs` overrides it both on the client (`LLMClientConfig`) and per request (`LLMRequestOptions`), and `timeoutMs: 0` disables the timeout in both places. Provider errors are rethrown as `Error` carrying the provider message when available (e.g., `error.message` from the HTTP response). An empty content is returned as-is — applications that need an empty-content policy (e.g., retry on reasoning models) keep it in their own code. `retry` optionally retries network errors, HTTP 429 and 5xx responses with exponential backoff; it is disabled by default because retrying a completion can duplicate work and billing (see `HttpRetry`).
 
 ---
 
@@ -494,7 +495,7 @@ fastify.register(new UsersRoutes().getRoutes, {
 | `User`, `UserRole`, `UserScope` | User model; scopes are application-defined strings. `User.fromJson(payload)` returns `null` when the payload is missing **or has no `id`** — it never fabricates a fresh identity for an unidentified payload |
 | `UserSession`                | Decoded session: `isAuthenticated`, `userId`, `userName`, `role`, `scopes` plus display metadata `credentialType` (`"jwt"` / `"api_token"`), `issuedAt`, `expiresAt`, `sessionStartedAt` |
 | `UserApiToken`               | API token model (only the SHA-256 hash is persisted)                   |
-| `UserPasswordSetPolicy` / `UserPasswordGetMinLength` | Install a password policy (minimum length and optional custom validator) |
+| `UserPasswordSetPolicy` / `UserPasswordGetMinLength` / `UserPasswordGetBcryptRounds` | Install a password policy (minimum length, optional custom validator and bcrypt cost) and read the effective values |
 | `UserPasswordValidate`       | Returns an error message when a password violates the policy/72-byte bcrypt limit, otherwise `null` |
 | `UserPasswordSetPassword` / `UserPasswordCheckPassword` / `UserPasswordCheckPasswordDummy` | bcrypt hashing, verification and the timing-equalizing dummy compare |
 | `UsersDataSetOTel`           | Injects the OTel tracer used by the users data module                  |
@@ -519,6 +520,8 @@ fastify.register(new UsersRoutes().getRoutes, {
 The limiter is registered lazily by `UsersRoutes` (`@fastify/rate-limit`, `hook: "preHandler"` so the login body is parsed before keying). By default it uses the in-memory store, so **limits are per process**: with N replicas an attacker gets N times the limit. Multi-replica deployments should inject a shared store constructor through `UsersRoutesOptions.rateLimitStore` (for example a Redis-backed `@fastify/rate-limit` store); the library adds no Redis dependency. When the host application has already registered `@fastify/rate-limit`, pass no store to `UsersRoutes` (supplying one throws at startup) and configure the store on the host registration instead. Behind a trusted reverse proxy, enable Fastify's `trustProxy` (for the trusted proxies only) so the client IP is used instead of the proxy's; otherwise `req.ip` is the proxy and all users share one bucket.
 
 **Password policy**: passwords must be non-empty and at most 72 bytes — bcrypt silently truncates longer input, which would make two long passwords sharing the first 72 bytes interchangeable. `AuthInit` installs `PASSWORD_MIN_LENGTH` (default `0`) through `UserPasswordSetPolicy`; applications may call it again with a custom `validator` for complexity rules. `UserPasswordValidate` returns the same message the routes send in a 400, and `UserPasswordSetPassword` refuses to hash an invalid password.
+
+**bcrypt cost**: `BCRYPT_ROUNDS` (default `10`, the historical value) sets the work factor of new password hashes and is clamped to `10-15`; every increment doubles the CPU time of a hash, so raising it slows login and password changes. Existing hashes keep the cost embedded when they were created — only new or changed passwords use the setting, and no rehash-on-login migration is performed. `UserPasswordGetBcryptRounds()` returns the effective value, and the unknown-user dummy comparison runs at the same cost.
 
 **Audit events**: `AuthSetAuditHandler(handler)` installs a callback that receives structured events for `login_success`, `login_failure`, `user_create`, `user_update`, `user_delete`, `password_change`, `api_token_create` and `api_token_revoke`; each event carries `outcome`, an ISO `timestamp`, actor/target ids and names, changed field names, token id and request IP where applicable. Events never contain passwords, password hashes, JWTs or API-token values/hashes. A throwing handler is swallowed so auditing can never fail a request, and without a handler events are dropped.
 
@@ -550,7 +553,7 @@ SQL is written SQLite-first; the `DbUtils` facade converts placeholders for Post
 
 **JWT revocation (opt-in)**: `role` and `scopes` are baked into a JWT at signing time, so a token stays valid (default 1 hour, at most the absolute session lifetime) after the user is deleted or their role changes. With `JWT_REVOCATION_ENABLED=true` (default `false`; safe to enable since 2.6.0, planned as the default in a future major) every JWT request re-reads the user and rejects tokens whose `tokenVersion` claim is stale; password changes, role/scope changes and deletion therefore invalidate previously issued JWTs. A rejected token is cached as unauthenticated for the rest of the request, so it cannot authorize any later guard. This requires the `users.tokenVersion` column. JWTs are always verified as HS256 (`algorithms: ["HS256"]` is pinned); the `iss`/`aud` claims are set to `JWT_ISSUER`/`JWT_AUDIENCE` (default `devopsplaybook.io`) and validated when present, and every token gets a random `jti` (reserved for a future denylist). Tokens issued before 2.6.0 without `iss`/`aud` remain accepted until they expire.
 
-**Response conventions**: creation answers 201, reads and deletes answer 200. Malformed or bodyless writes answer 400 (`Missing: …` / `Invalid: …`) instead of HTTP 500: every body field is checked for presence **and type** at the route boundary. `GET /` is ordered by name and paginated with `?limit=&offset=`: the default page size is 100, the maximum is 1000, `offset` requires `limit`, and invalid values answer 400. The bootstrap insert, the last-admin guard and the API-token cap are enforced atomically in SQL (the first-admin insert only runs while the table is empty, the demotion/delete only while another admin remains, and the token insert only below the cap), serialised across Postgres replicas with advisory locks; deleting a user removes its API tokens in the same transaction. Credentials must use the `Bearer` scheme (case-insensitive): another scheme carrying a valid JWT is rejected. Unknown usernames run a dummy bcrypt compare so login timing does not reveal whether an account exists. Unauthenticated requests answer 401 `UNAUTHENTICATED`, forbidden ones 403 `FORBIDDEN`; the guards **send the response and then throw** — callers must wrap the guard in `try/catch` and `return` from the catch block (see the `UsersRoutes` implementations) so the route does not continue after the response.
+**Response conventions**: creation answers 201, reads and deletes answer 200. Malformed or bodyless writes answer 400 (`Missing: …` / `Invalid: …`) instead of HTTP 500: every body field is checked for presence **and type** at the route boundary. User names (`POST /` and `POST /session`) are trimmed at the boundary and must then be 1-64 characters of ASCII letters/digits with inner `.`, `_` or `-` (the first and last characters must be alphanumeric): an empty or whitespace-only name answers 400 `Missing: Name`, a longer one 400 `Name Too Long`, and characters outside that set 400 `Invalid: Name`. The trimmed name is used for lookup, uniqueness, audit events and rate-limit keys. Existing rows that are padded, longer than 64 characters or use other characters must be renamed before deploying, since login now rejects them and there is no rename route. `GET /` is ordered by name and paginated with `?limit=&offset=`: the default page size is 100, the maximum is 1000, `offset` requires `limit`, and invalid values answer 400. The bootstrap insert, the last-admin guard and the API-token cap are enforced atomically in SQL (the first-admin insert only runs while the table is empty, the demotion/delete only while another admin remains, and the token insert only below the cap), serialised across Postgres replicas with advisory locks; deleting a user removes its API tokens in the same transaction. Credentials must use the `Bearer` scheme (case-insensitive): another scheme carrying a valid JWT is rejected. Unknown usernames run a dummy bcrypt compare so login timing does not reveal whether an account exists. Unauthenticated requests answer 401 `UNAUTHENTICATED`, forbidden ones 403 `FORBIDDEN`; the guards **send the response and then throw** — callers must wrap the guard in `try/catch` and `return` from the catch block (see the `UsersRoutes` implementations) so the route does not continue after the response.
 
 ---
 
@@ -599,7 +602,7 @@ await TimeoutWait(5000); // wait 5 seconds
 
 #### `HttpRetry` -- Bounded HTTP Retry
 
-Shared retry helper used by the notifications and LLM clients. It retries only transient failures — network/timeout errors (Axios errors without a response), HTTP 429 and 5xx — using exponential backoff with full jitter. Other errors (including 4xx) are rethrown immediately. Retrying is **disabled by default** (`maxAttempts: 1`) because retrying non-idempotent requests (for example an LLM completion) can duplicate work and billing.
+Shared retry helper used by the notifications and LLM clients. It retries only transient failures — network/timeout errors (Axios errors without a response), HTTP 429 and 5xx — using exponential backoff with full jitter. Other errors (including 4xx) are rethrown immediately, and a request canceled by the caller (`ERR_CANCELED`, e.g. through an `AbortSignal`) is never retried. Retrying is **disabled by default** (`maxAttempts: 1`) because retrying non-idempotent requests (for example an LLM completion) can duplicate work and billing.
 
 ```ts
 import { HttpRetry } from "@devopsplaybook.io/common-utils";
@@ -616,7 +619,7 @@ const response = await HttpRetry(
 | `HttpRetry`                  | Run an operation with bounded, jittered backoff                          |
 | `HttpRetryOptions`           | `{ maxAttempts?, baseDelayMs?, maxDelayMs? }` (attempts capped at 10)    |
 | `HttpRetryNormalizeOptions`  | Validate and clamp options to their defaults                             |
-| `HttpRetryIsRetryable`       | `true` for network errors, HTTP 429 and 5xx                              |
+| `HttpRetryIsRetryable`       | `true` for network errors, HTTP 429 and 5xx (never for `ERR_CANCELED`)   |
 
 ### Quick Start
 
@@ -660,15 +663,17 @@ span.end();
 
 The `.github/workflows/` directory contains **reusable workflows** that other repositories can call to standardize their CI/CD pipelines.
 
+This repository's own `pr-check.yml` runs a `workflow-lint` job (`actionlint` v1.7.7) on every pull request, so a broken reusable workflow fails on its PR before it reaches `main` and breaks consumers. The reusable calls stay pinned at `@main` on purpose: pointing them at `./.github/workflows/...` would let a pull request execute a modified copy of the workflow that gates it. Lint locally with `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7`.
+
 ### Reusable Workflows
 
 | Workflow        | File                       | Trigger         | Purpose                                                                                                                                                       |
 | --------------- | -------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **NPM Merge**   | `reusable-npm-merge.yml`   | `workflow_call` | Lint, test, build, and publish a release to npm on merge to main. Uploads coverage to Quality Dashboard. Only publishes if the version doesn't already exist. |
 | **NPM PR**      | `reusable-npm-pr.yml`      | `workflow_call` | Lint, test, and build on PR. Publishes a **beta** version tagged `beta` and comments the PR with install instructions.                                        |
-| **NPM Upgrade** | `reusable-npm-upgrade.yml` | `workflow_call` | Runs `npm-check-updates -u`, bumps the patch version, and opens a PR. Supports monorepo sub-folders via `npm_services` input.                                 |
-| **PR Verify**   | `reusable-pr-verify.yml`   | `workflow_call` | Matrix build/lint/test for multiple Node.js apps, plus a multi-platform Docker build pushed as `beta-pr-<PR number>` and `beta`. For monorepos with Docker images. |
-| **Merge Build** | `reusable-merge-build.yml` | `workflow_call` | Promotes the image validated by the merged PR to the `latest`, `beta`, version, major and minor tags. Runs no build, lint or test.                                      |
+| **NPM Upgrade** | `reusable-npm-upgrade.yml` | `workflow_call` | Runs `npm-check-updates -u`, bumps the patch version of every package whose manifests changed (root and each changed `npm_services` sub-folder), and opens a PR. Skips only when another dependency-update PR is already open. |
+| **PR Verify**   | `reusable-pr-verify.yml`   | `workflow_call` | Matrix build/lint/test for multiple Node.js apps, plus a multi-platform Docker build pushed as `beta-pr-<PR number>` and `beta`, labelled with the PR head commit. For monorepos with Docker images. |
+| **Merge Build** | `reusable-merge-build.yml` | `workflow_call` | Promotes the image validated by the merged PR to the `latest`, `beta`, version, major and minor tags after verifying its revision label, and falls back to a build on mismatch. Runs no build, lint or test.                                      |
 | **Dependency Audit** | `reusable-npm-audit.yml` | `workflow_call` | Production dependency audit gate: fails on unallowlisted high/critical runtime advisories and reports dev-only advisories in the job summary. Called by PR Verify and Merge Build when `audit_enabled` is true. |
 
 ### Inputs and Secrets
@@ -693,6 +698,8 @@ The `.github/workflows/` directory contains **reusable workflows** that other re
 | -------------- | -------- | --------------------------------------- | ------------------------------------------------------------- |
 | `npm_services` | Yes      | --                                      | JSON array of sub-folder paths (e.g. `'["server","client"]'`) |
 | `pr_branch`    | No       | `feature/YYYY.MM.DD-dependency-updates` | Branch name for the PR                                        |
+
+The workflow skips only when this branch or another pull request titled `chore: update NPM dependencies` is already open — an unrelated open PR no longer blocks the update. It bumps the **patch** version of every package whose `package.json`/`package-lock.json` actually changed: the root and each affected `npm_services` sub-folder (the new version is mirrored into `.version` and `.packages[""].version` of the lockfile).
 
 #### Docker/Node Workflows (`reusable-pr-verify`, `reusable-merge-build`)
 
@@ -767,25 +774,29 @@ Docker images are built **once**, on the pull request, and **promoted** on merge
 
 | Stage            | Workflow               | Registry tags written                                                                                       |
 | ---------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Pull request     | `reusable-pr-verify`   | `beta-pr-<PR number>` (identifies this PR's artifact) and `beta` (moving pointer to the latest PR build)     |
+| Pull request     | `reusable-pr-verify`   | `beta-pr-<PR number>` (identifies this PR's artifact) and `beta` (moving pointer to the latest PR build), both labelled `org.opencontainers.image.revision=<PR head commit>` |
 | Merge to default | `reusable-merge-build` | `<version>`, `<major>`, `<minor>`, `beta` and `latest`, copied from `beta-pr-<PR number>`                            |
 
 On merge the workflow:
 
 1. Resolves the pull request behind the commit pushed to the default branch through `GET /repos/{owner}/{repo}/commits/{sha}/pulls`, falling back to the PR number in the commit **title** (`<title> (#123)` for squash and rebase, `Merge pull request #123` for merge commits). Only the title is parsed, so a `fixes #99` reference in the commit body cannot select the wrong pull request.
-2. Carbon-copies the manifest with `docker buildx imagetools create --prefer-index=false`, which preserves the exact digest and the full multi-platform image index.
-3. Reads back the digest of every tag it published and fails if one differs from the source.
+2. **Verifies the provenance of the candidate image** before promoting it: it fetches `refs/pull/<N>/head`, reads the image's `org.opencontainers.image.revision` label and accepts `beta-pr-<N>` only when the label equals that head commit **and** the head's tree equals the merged commit (`git diff --quiet`). A missing label, a moved PR head, an outdated branch or an unresolvable PR number falls back to a build from `GITHUB_SHA`; an unverified image is never promoted.
+3. Carbon-copies the manifest with `docker buildx imagetools create --prefer-index=false`, which preserves the exact digest and the full multi-platform image index.
+4. Reads back the digest of every tag it published and fails if one differs from the source.
 
 The resolve step logs how it reached its answer, which is the first thing to check when a merge falls back to a build:
 
 ```text
 Service:  planner-llm-agent 0.2.0
 PR:       2 (resolved via api)
+Revision: 4d4ea0d… (expected 4d4ea0d…)
 Source:   <namespace>/planner-llm-agent:beta-pr-2
 Strategy: retag
 ```
 
-`Strategy` is `retag` when the PR image was found and `build` when it was not.
+`Strategy` is `retag` when a verified PR image was found and `build` when it was not.
+
+Images built before the revision label was introduced carry no label, so each repository's first merge after adopting this version falls back to one full build; later PRs are labelled and promoted again.
 
 No `npm ci`, build, lint or test runs on merge, and no Docker build happens unless promotion is impossible. The build fallback keeps releases working when a commit reaches the default branch with no matching `beta-pr-<PR number>` image, such as a direct push, a rebase merge (which leaves no PR number in the commit title), or a PR whose image was deleted from the registry.
 
@@ -806,6 +817,11 @@ name: Main Build
 on:
   push:
     branches: ["main"]
+# Serialise merge runs without cancelling them: two quick merges must publish
+# and promote one after the other.
+concurrency:
+  group: main-build
+  cancel-in-progress: false
 jobs:
   npm-merge:
     permissions:

@@ -76,6 +76,11 @@ export interface ConfigCommonInterface
   AUTH_RATE_LIMIT_WINDOW_SECONDS: number;
   /** Minimum password length (`0` = only non-empty passwords). */
   PASSWORD_MIN_LENGTH: number;
+  /**
+   * bcrypt cost factor applied to new password hashes. Default 10; the users
+   * module clamps it to 10-15. Each increment doubles the CPU cost.
+   */
+  BCRYPT_ROUNDS: number;
   /** Revoke every API token when a user changes their password. */
   API_TOKENS_REVOKE_ON_PASSWORD_CHANGE: boolean;
   CORS_POLICY_ORIGIN: string;
@@ -229,6 +234,12 @@ export abstract class ConfigBase implements ConfigCommonInterface {
   public AUTH_RATE_LIMIT_WINDOW_SECONDS = 60;
   /** Minimum password length enforced by the auth module. */
   public PASSWORD_MIN_LENGTH = 0;
+  /**
+   * bcrypt cost factor for new password hashes (default 10, clamped to
+   * 10-15). Every increment doubles the CPU time of a hash so raising it
+   * slows login and password changes; existing hashes keep their own cost.
+   */
+  public BCRYPT_ROUNDS = 10;
   /** Revoke every API token when a user changes their password. */
   public API_TOKENS_REVOKE_ON_PASSWORD_CHANGE = false;
   public CORS_POLICY_ORIGIN = "";
@@ -310,6 +321,7 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       { field: "AUTH_RATE_LIMIT_STATUS_MAX" },
       { field: "AUTH_RATE_LIMIT_WINDOW_SECONDS" },
       { field: "PASSWORD_MIN_LENGTH" },
+      { field: "BCRYPT_ROUNDS" },
       { field: "API_TOKENS_REVOKE_ON_PASSWORD_CHANGE" },
       { field: "CORS_POLICY_ORIGIN" },
       { field: "DATA_DIR" },

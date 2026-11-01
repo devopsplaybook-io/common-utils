@@ -28,22 +28,29 @@ jobs:
           PR_BRANCH: ${{ inputs.pr_branch }}
         run: |
           if [ -n "${PR_BRANCH}" ]; then
-            echo "name=${PR_BRANCH}" >> "$GITHUB_OUTPUT"
+            echo "name=${PR_BRANCH}" >> "${GITHUB_OUTPUT}"
           else
-            echo "name=feature/$(date +'%Y.%m.%d')-dependency-updates" >> "$GITHUB_OUTPUT"
+            echo "name=feature/$(date +'%Y.%m.%d')-dependency-updates" >> "${GITHUB_OUTPUT}"
           fi
 
       - name: Check for existing PR
         id: check_pr
         env:
           GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.branch.outputs.name }}
         run: |
-          EXISTING_PR=$(gh pr list --state open --json number --jq 'length')
-          if [ "${EXISTING_PR}" -gt 0 ]; then
-            echo "An open PR already exists, skipping"
-            echo "skip=true" >> $GITHUB_OUTPUT
+          # Another open pull request (a feature, a fix) must not block the
+          # dependency update: only skip when this exact branch or another
+          # dependency-update pull request is already open.
+          OPEN_PRS=$(gh pr list --state open --limit 200 --json number,title,headRefName)
+          EXISTING=$(printf '%s' "${OPEN_PRS}" | jq \
+            --arg branch "${BRANCH}" \
+            '[.[] | select(.headRefName == $branch or (.title | startswith("chore: update NPM dependencies")))] | length')
+          if [ "${EXISTING}" -gt 0 ]; then
+            echo "A dependency-update PR is already open, skipping"
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
           else
-            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
           fi
 
       - name: Update NPM dependencies
@@ -68,14 +75,48 @@ jobs:
             echo "HAS_CHANGES=true" >> "$GITHUB_ENV"
           fi
 
-      - name: Bump root package.json patch version
+      - name: Bump the patch version of every changed package
         if: steps.check_pr.outputs.skip == 'false' && env.HAS_CHANGES == 'true'
+        env:
+          NPM_SERVICES: ${{ inputs.npm_services }}
         run: |
           set -e
-          CURRENT_VERSION=$(jq -r '.version' package.json)
-          NEW_VERSION=$(echo "${CURRENT_VERSION}" | awk -F. '{print $1"."$2"."$3+1}')
-          jq --arg v "${NEW_VERSION}" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
-          echo "Bumped root package.json version: ${CURRENT_VERSION} -> ${NEW_VERSION}"
+
+          # Bump <dir>/package.json (root when the argument is empty) only when
+          # its manifests actually changed, and mirror the version into the
+          # lockfile so `npm ci` does not report a mismatch.
+          bump_patch() {
+            local dir="$1"
+            local prefix="${dir:+${dir}/}"
+            local manifest="${prefix}package.json"
+            local lockfile="${prefix}package-lock.json"
+            if [ ! -f "${manifest}" ]; then
+              return 0
+            fi
+            if git diff --quiet HEAD -- "${manifest}" "${lockfile}"; then
+              echo "No manifest change in ${dir:-root}, version unchanged"
+              return 0
+            fi
+            local current new
+            current=$(jq -r '.version' "${manifest}")
+            new=$(printf '%s' "${current}" | awk -F. '{print $1"."$2"."$3+1}')
+            jq --arg v "${new}" '.version = $v' "${manifest}" > "${manifest}.tmp"
+            mv "${manifest}.tmp" "${manifest}"
+            echo "Bumped ${dir:-root} package.json version: ${current} -> ${new}"
+            if [ -f "${lockfile}" ]; then
+              jq --arg v "${new}" '
+                (if has("version") then .version = $v else . end)
+                | (if ((.packages // {}) | has("")) then .packages[""].version = $v else . end)
+              ' "${lockfile}" > "${lockfile}.tmp"
+              mv "${lockfile}.tmp" "${lockfile}"
+            fi
+          }
+
+          bump_patch ""
+          while IFS= read -r FOLDER; do
+            [ -n "${FOLDER}" ] || continue
+            bump_patch "${FOLDER}"
+          done < <(printf '%s' "${NPM_SERVICES}" | jq -r '.[]')
 
       - name: Create Pull Request
         if: steps.check_pr.outputs.skip == 'false' && env.HAS_CHANGES == 'true'
@@ -89,15 +130,16 @@ jobs:
           git checkout -b "${BRANCH}"
           # Stage only the manifests the update may modify, never unrelated
           # files that happen to exist in the workspace.
-          PACKAGE_PATHS="package.json package-lock.json"
-          for FOLDER in $(echo "${NPM_SERVICES}" | jq -r '.[]'); do
+          PACKAGE_PATHS=(package.json package-lock.json)
+          while IFS= read -r FOLDER; do
+            [ -n "${FOLDER}" ] || continue
             for FILE in package.json package-lock.json; do
               if [ -f "${FOLDER}/${FILE}" ]; then
-                PACKAGE_PATHS="${PACKAGE_PATHS} ${FOLDER}/${FILE}"
+                PACKAGE_PATHS+=("${FOLDER}/${FILE}")
               fi
             done
-          done
-          git add ${PACKAGE_PATHS}
+          done < <(printf '%s' "${NPM_SERVICES}" | jq -r '.[]')
+          git add -- "${PACKAGE_PATHS[@]}"
           git commit -m "chore: update NPM dependencies"
           git push origin "${BRANCH}"
           gh pr create \
