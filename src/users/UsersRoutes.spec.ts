@@ -1,9 +1,3 @@
-// Unique ids per entity so multiple users can coexist in one test DB.
-jest.mock("uuid", () => {
-  let counter = 0;
-  return { v4: () => `mock-uuid-${++counter}` };
-});
-
 import * as nodeFs from "fs";
 import * as os from "os";
 import * as path from "path";

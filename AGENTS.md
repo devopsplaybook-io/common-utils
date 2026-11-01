@@ -48,6 +48,10 @@ src/
 
 `reusable-npm-audit.yml` is called by `reusable-pr-verify.yml` and `reusable-merge-build.yml` when the caller sets `audit_enabled: true` (default `false`, so existing consumers with pre-existing advisories keep working). It runs `npm audit --omit=dev` per app directory: unallowlisted `high`/`critical` advisories on production dependencies fail the job, while the full audit (dev/build-only findings included) is reported in the job summary. Accepted exceptions live in the consuming repository's `.github/audit-allowlist.json` (`id`, `package`, `scope` `runtime|dev`, `reason`, `owner`, `expires` `YYYY-MM-DD`); only unexpired `runtime` entries suppress the blocking gate. Never silence an advisory by weakening a check: allowlist entries are time-boxed and owned. Optional npm caches are not used in this job because it only reads the lockfile.
 
+`reusable-npm-pr.yml` and `reusable-npm-merge.yml` follow the same policy for this package: they block on `npm audit --omit=dev --audit-level=high` and report the full tree with a non-blocking `npm audit` (dev-only advisories never block a release).
+
+`reusable-npm-merge.yml` publishes with `--provenance` when the caller passes `publish_provenance: true` and grants `id-token: write`. The permission is not declared inside the shared workflow: a called workflow cannot elevate its caller's token, so adding it there would break existing consumers (`otel-utils`, `otel-utils-fastify`) whose callers do not grant it.
+
 ## Weekly Dependency Updates
 
 The scheduled `npm-upgrade.yml` caller was retired: it created dependency upgrade pull requests every week that no one merged. `reusable-npm-upgrade.yml` is kept for manual, on-demand upgrades (`workflow_call`; adopting repositories can trigger it through their own `workflow_dispatch` caller).
@@ -64,6 +68,7 @@ The weekly update of the shared npm libraries is agent-driven instead: a Kuberne
 - **Auth modules**: `AuthSetOTel(tracer)` and `UsersDataSetOTel(tracer)` must be called before `AuthInit`. Application scopes are registered through `AuthInit(context, config, allScopes)`; `UsersRoutes` retrieves the request span via `OTelRequestSpan(req)` from `@devopsplaybook.io/otel-utils-fastify` (populated by its Fastify hooks).
 - **ModuleLogger pattern**: `StandardLogger` only exposes `createModuleLogger(name)`. DB modules call `logger.createModuleLogger("ModuleName")` internally. Never call `.info()` or `.error()` directly on a `StandardLogger`.
 - **SQLite-first SQL**: Write SQL with `?` placeholders. The `DbUtils` facade and `DbUtilsNoTelemetry` module auto-convert to `$1, $2, ...` for Postgres via `convertToPostgresPlaceholders()`.
+- **Ids**: Use `crypto.randomUUID()` (UUID v4) — there is no `uuid` dependency. Tests that need deterministic ids replace it with a partial `jest.mock("crypto", () => ({ ...jest.requireActual("crypto"), randomUUID: () => "..." }))`.
 - **Migration convention**: SQL files named `init-NNNN.sql`. `init-0000.sql` must create the `metadata` table. Subsequent files are applied in lexicographic order; applied versions are tracked in `metadata` for idempotency.
 - **Immutable Docker builds**: images are built once on the pull request (`reusable-pr-verify.yml` pushes `beta-pr-<PR number>` and `beta`) and promoted unchanged on merge (`reusable-merge-build.yml` writes `<version>`, `<major>`, `<minor>`, `beta` and `latest`). The merge workflow runs no build, lint or test: it resolves the merged PR, carbon-copies the manifest with `docker buildx imagetools create --prefer-index=false`, then reads back each published digest and fails on a mismatch. It falls back to a full build only when no `beta-pr-<PR number>` image can be promoted. Image name and version come from the root `package.json`, and PR branches must be up to date with the default branch before merging.
 - **Reusable workflow permissions ceiling**: `reusable-merge-build.yml` may request only `contents: read`. A called workflow cannot exceed its caller's permissions, and callers use the default read-only token whose ceiling is `contents: read, pull-requests: none`. Adding `pull-requests: read` does not fail here — it fails in every consuming repo at startup with `Invalid workflow file ... requesting 'pull-requests: read', but is only allowed 'pull-requests: none'`. `GET /repos/{owner}/{repo}/commits/{sha}/pulls` works with `contents: read`, so no extra scope is needed.
@@ -87,7 +92,6 @@ All three commands must pass before committing. The CI pipeline (`reusable-npm-m
 | `@devopsplaybook.io/otel-utils-fastify` | `OTelRequestSpan` request-span lookup used by `UsersRoutes`                                |
 | `better-sqlite3`                        | Synchronous SQLite driver (NOT the callback-based `sqlite3`)                               |
 | `pg`                                    | PostgreSQL client with connection pooling                                                  |
-| `uuid`                                  | v14+ (ESM -- requires `jest.mock("uuid")` in tests)                                        |
 | `fs-extra`                              | Async/sync file operations, `readJson`/`ensureDir`                                         |
 | `bcrypt`                                | Password hashing (users module)                                                            |
 | `jsonwebtoken`                          | JWT signing/verification (auth module)                                                     |
@@ -96,7 +100,6 @@ All three commands must pass before committing. The CI pipeline (`reusable-npm-m
 
 ## Known Gotchas
 
-- **uuid ESM**: `uuid` v14+ ships ESM. In any test that transitively imports `uuid`, add `jest.mock("uuid", () => ({ v4: () => "mock-uuid-1234" }))` to avoid `SyntaxError: Unexpected token 'export'`.
 - **better-sqlite3 is synchronous**: `SqlDbUtils` functions return values directly (not Promises). `PostgresDbUtils` functions return Promises. The `DbUtils` facade returns `number | Promise<number>` depending on the active backend.
 - **Disable-comment placement**: `eslint-disable-next-line` applies to the **immediately following line only** (oxlint honors these comments too). When disabling a rule inside a function call argument, place the comment directly before the offending expression, not before the function call.
 - **pg callback typing**: Always explicitly type pg callback parameters: `(error: Error | null, result: { rowCount: number | null })`. TypeScript cannot infer these from the overloaded `pool.query` signature.

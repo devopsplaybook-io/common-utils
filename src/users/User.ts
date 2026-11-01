@@ -1,4 +1,4 @@
-import { v4 as uuidv4 } from "uuid";
+import { randomUUID } from "crypto";
 
 /**
  * User role. `admin` bypasses scope checks; `user` is restricted
@@ -73,7 +73,7 @@ export class User {
   public tokenVersion = 0;
 
   constructor() {
-    this.id = uuidv4();
+    this.id = randomUUID();
   }
 
   public toJson(): any {

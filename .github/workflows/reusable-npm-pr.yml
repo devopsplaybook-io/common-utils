@@ -74,8 +74,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Audit dependencies
-        run: npm audit --audit-level=high
+      - name: Audit production dependencies (blocking)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Report full dependency audit (informational)
+        if: always()
+        run: npm audit || true
 
       - name: Run linting
         run: npm run lint

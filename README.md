@@ -33,13 +33,12 @@ npm install @devopsplaybook.io/common-utils
 | `better-sqlite3`                        | Synchronous SQLite driver                              |
 | `pg`                                    | PostgreSQL client (`Pool`)                             |
 | `fs-extra`                              | File system helpers                                    |
-| `uuid`                                  | UUID generation for JWT keys                           |
 | `axios`                                 | HTTP client for the notifications and LLM integrations |
 | `bcrypt`                                | Password hashing for the users module                  |
 | `jsonwebtoken`                          | JWT signing/verification for the auth module           |
 | `fastify`                               | HTTP framework types for the users routes              |
 
-**Node.js >= 22.12 is required** (`engines.node`): `uuid` v14 ships as ESM-only and this package is CommonJS, so `require("uuid")` relies on Node's `require(esm)` support, available from 22.12.
+**Node.js >= 22.12 is required** (`engines.node`). User and API-token ids are generated with the built-in `crypto.randomUUID()` (UUID v4).
 
 `fastify` is kept as a regular dependency (not a peer dependency) because `UsersRoutes` is typed against its `FastifyInstance` / `RequestGenericInterface` types: apps that register the routes already have fastify, and apps that don't use the routes must not be forced to add it.
 
@@ -646,6 +645,7 @@ The `.github/workflows/` directory contains **reusable workflows** that other re
 | ------------------ | -------- | ------- | --------------------------------------------------------- |
 | `node_version`     | No       | `"22"`  | Node.js version                                           |
 | `npm_package_name` | Yes      | --      | npm package name (e.g. `@devopsplaybook.io/common-utils`) |
+| `publish_provenance` | No     | `false` | Publish with npm provenance (NPM Merge only; the caller must grant `id-token: write`) |
 
 | Secret                    | Required | Description                               |
 | ------------------------- | -------- | ----------------------------------------- |
@@ -695,6 +695,8 @@ The `.github/workflows/` directory contains **reusable workflows** that other re
 - **Blocking:** `npm audit --omit=dev` — every `high` or `critical` advisory affecting production dependencies fails the job, unless an active `runtime` allowlist entry covers it. Aggregate entries (whose `via` lists dependency names only) are not gated directly; the leaf advisory is evaluated on its own entry.
 - **Informational:** the full `npm audit`, including dev/build-only findings, is rendered as a Markdown table in the job summary. It never fails the build.
 - **Opt-in:** `audit_enabled` defaults to `false` so existing consumers with pre-existing advisories are not broken; enable it once their production tree is clean or allowlisted.
+
+`reusable-npm-pr.yml` and `reusable-npm-merge.yml` use the same policy for their own package: a blocking `npm audit --omit=dev --audit-level=high`, followed by a non-blocking full-tree `npm audit` report. Dev-only advisories are reported but never block a release.
 
 #### Audit allowlist
 
@@ -772,9 +774,13 @@ on:
     branches: ["main"]
 jobs:
   npm-merge:
+    permissions:
+      contents: read
+      id-token: write
     uses: devopsplaybook-io/common-utils/.github/workflows/reusable-npm-merge.yml@main
     with:
       npm_package_name: "@your-scope/your-package"
+      publish_provenance: true
     secrets:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 ```
@@ -828,4 +834,4 @@ npm run test     # Jest with coverage
 
 ## License
 
-ISC
+ISC — see [LICENSE](./LICENSE).

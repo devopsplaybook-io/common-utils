@@ -1,7 +1,3 @@
-jest.mock("uuid", () => ({
-  v4: () => "mock-uuid-1234",
-}));
-
 import * as nodeFs from "fs";
 import * as os from "os";
 import * as path from "path";

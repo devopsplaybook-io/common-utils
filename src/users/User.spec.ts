@@ -1,7 +1,3 @@
-jest.mock("uuid", () => ({
-  v4: () => "mock-uuid-1234",
-}));
-
 import { User } from "./User";
 
 describe("User.fromJson", () => {
@@ -116,5 +112,18 @@ describe("User.normalizeScopes", () => {
 
     expect(scopes).toEqual(["traces"]);
     expect(scopes).not.toBe(input);
+  });
+});
+
+describe("User id generation", () => {
+  it("generates a fresh RFC 4122 v4 identifier per instance", () => {
+    const first = new User();
+    const second = new User();
+    const uuidV4 =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+    expect(first.id).toMatch(uuidV4);
+    expect(second.id).toMatch(uuidV4);
+    expect(first.id).not.toBe(second.id);
   });
 });

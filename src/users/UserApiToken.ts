@@ -1,4 +1,4 @@
-import { v4 as uuidv4 } from "uuid";
+import { randomUUID } from "crypto";
 
 /**
  * User-scoped API token.
@@ -36,7 +36,7 @@ export class UserApiToken {
   public lastUsedAt: string | null = null;
 
   constructor() {
-    this.id = uuidv4();
+    this.id = randomUUID();
   }
 
   public toJson(): any {

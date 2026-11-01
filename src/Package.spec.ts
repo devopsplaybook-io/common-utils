@@ -37,6 +37,7 @@ describe("Packaging", () => {
   it("ships only the compiled output, not sources, specs or workflows", () => {
     const files = npmPackFiles();
     expect(files).toContain("package.json");
+    expect(files).toContain("LICENSE");
     expect(files.some((f) => f.startsWith("dist/"))).toBe(true);
     expect(files.some((f) => f.startsWith("src/"))).toBe(false);
     expect(files.some((f) => f.endsWith(".spec.ts"))).toBe(false);
@@ -79,8 +80,54 @@ describe("Packaging", () => {
         (pkg.exports[subpath].default as string).startsWith("./dist/"),
       ).toBe(true);
     }
-    // uuid v14 is ESM-only and requires Node >= 22.12.
     expect(pkg.engines.node).toBe(">=22.12");
+  });
+
+  it("declares repository, license and patched supply-chain dependencies", () => {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"),
+    );
+    expect(pkg.license).toBe("ISC");
+    expect(pkg.repository).toEqual({
+      type: "git",
+      url: "git+https://github.com/devopsplaybook-io/common-utils.git",
+    });
+    expect(pkg.overrides["follow-redirects"]).toBe("^1.16.2");
+    expect(pkg.dependencies.uuid).toBeUndefined();
+    expect(pkg.devDependencies["@types/uuid"]).toBeUndefined();
+    expect(fs.readFileSync(path.join(repoRoot, "LICENSE"), "utf8")).toContain(
+      "ISC License",
+    );
+
+    const lock = JSON.parse(
+      fs.readFileSync(path.join(repoRoot, "package-lock.json"), "utf8"),
+    );
+    const atLeast = (version: string, minimum: string): boolean => {
+      const actual = version.split(".").map(Number);
+      const floor = minimum.split(".").map(Number);
+      for (let index = 0; index < floor.length; index += 1) {
+        if (actual[index] !== floor[index]) {
+          return actual[index] > floor[index];
+        }
+      }
+      return true;
+    };
+    expect(
+      atLeast(lock.packages["node_modules/follow-redirects"].version, "1.16.2"),
+    ).toBe(true);
+    for (const [location, entry] of Object.entries(lock.packages)) {
+      if (
+        location === "node_modules/fast-uri" ||
+        location.endsWith("/node_modules/fast-uri")
+      ) {
+        expect(atLeast((entry as { version: string }).version, "3.1.9")).toBe(
+          true,
+        );
+      }
+    }
+    expect(
+      atLeast(lock.packages["node_modules/fast-uri"].version, "4.2.3"),
+    ).toBe(true);
   });
 
   it("resolves every export target to a compiled source file", () => {

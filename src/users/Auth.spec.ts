@@ -1,5 +1,6 @@
-jest.mock("uuid", () => ({
-  v4: () => "mock-uuid-1234",
+jest.mock("crypto", () => ({
+  ...jest.requireActual("crypto"),
+  randomUUID: () => "mock-uuid-1234",
 }));
 
 jest.mock("../DbUtils", () => ({

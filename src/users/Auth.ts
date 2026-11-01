@@ -1,8 +1,7 @@
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { StandardTracer } from "@devopsplaybook.io/otel-utils";
 import type { Span } from "@opentelemetry/sdk-trace";
 import * as jwt from "jsonwebtoken";
-import { v4 as uuidv4 } from "uuid";
 import { DbUtilsExecSQL, DbUtilsQuerySQL, DbUtilsWithLock } from "../DbUtils";
 import { User, UserScope } from "./User";
 import { UserPasswordSetPolicy } from "./UserPassword";
@@ -162,7 +161,7 @@ export async function AuthInit(
           SQL_QUERIES.GET_AUTH_TOKEN,
         );
         if (authKeyRaw.length == 0) {
-          configIn.JWT_KEY = uuidv4();
+          configIn.JWT_KEY = randomUUID();
           await DbUtilsExecSQL(span, SQL_QUERIES.INSERT_AUTH_TOKEN, [
             configIn.JWT_KEY,
             new Date().toISOString(),
