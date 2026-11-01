@@ -2,7 +2,7 @@ import { StandardLogger, ModuleLogger } from "@devopsplaybook.io/otel-utils";
 import {
   DbUtilsGetDatabase,
   DbUtilsGetType,
-  convertToPostgresPlaceholders,
+  convertToPostgresPlaceholdersCached,
 } from "./DbUtils";
 
 let logger: ModuleLogger | undefined;
@@ -56,33 +56,6 @@ function prepareCached(db: object, sql: string): any {
 /** Maximum number of bound parameters per statement on each backend. */
 const PARAMS_PER_STATEMENT = { postgres: 65535, sqlite: 32766 };
 
-/**
- * `convertToPostgresPlaceholders` is linear in the SQL length and runs on
- * every call, including hot ingestion paths that re-use the same generated
- * statement. Results are cached in a bounded LRU so a stream of one-shot
- * statements cannot grow the cache without limit.
- */
-const CONVERTED_SQL_CACHE_MAX = 500;
-const convertedSqlCache = new Map<string, string>();
-
-function convertCached(sql: string): string {
-  const cached = convertedSqlCache.get(sql);
-  if (cached !== undefined) {
-    convertedSqlCache.delete(sql);
-    convertedSqlCache.set(sql, cached);
-    return cached;
-  }
-  const converted = convertToPostgresPlaceholders(sql);
-  if (convertedSqlCache.size >= CONVERTED_SQL_CACHE_MAX) {
-    const oldest = convertedSqlCache.keys().next().value;
-    if (oldest !== undefined) {
-      convertedSqlCache.delete(oldest);
-    }
-  }
-  convertedSqlCache.set(sql, converted);
-  return converted;
-}
-
 function logError(message: string, error: Error): void {
   logger?.error(message, error);
 }
@@ -96,8 +69,33 @@ export function DbUtilsNoTelemetrySetLogger(loggerIn: StandardLogger): void {
 }
 
 /**
+ * `tableCols` is interpolated verbatim into the INSERT, so it is a trusted,
+ * developer-controlled SQL fragment (never derived from request data). Only
+ * the documented shape is accepted: `INTO <table> (<column>, ...)` with
+ * simple unquoted or double-quoted identifiers, optionally schema-qualified.
+ */
+const TABLE_COLS_PATTERN = new RegExp(
+  '^\\s*INTO\\s+(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)(?:\\.(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*))?' +
+    '\\s*\\(\\s*(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)(?:\\s*,\\s*(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*))*\\s*\\)\\s*$',
+  "i",
+);
+
+function assertValidTableCols(tableCols: string): void {
+  if (!TABLE_COLS_PATTERN.test(tableCols)) {
+    throw new Error(
+      `Invalid tableCols fragment: "${tableCols}" (expected "INTO <table> (<column>, ...)" with simple identifiers; it must never be derived from request data)`,
+    );
+  }
+}
+
+/**
  * Execute a multi-row INSERT with a flat parameter array.
  * Builds: INSERT INTO <tableCols> VALUES (?,?...),(?,?...),...
+ *
+ * `tableCols` is a static, developer-controlled SQL fragment
+ * (`"INTO table (col1, col2)"`): it is validated against the identifier-list
+ * shape and then interpolated, so it must **never** come from request data.
+ * Values remain parameterised.
  *
  * Large inputs are chunked so the statement never exceeds the backend's
  * bound-parameter limit (65535 on Postgres, 32766 on SQLite). A chunked
@@ -111,6 +109,7 @@ export function DbUtilsNoTelemetryBatchInsert(
   rows: any[][],
 ): number | Promise<number> {
   if (rows.length === 0) return 0;
+  assertValidTableCols(tableCols);
   const dbType = DbUtilsGetType();
   const maxRowsPerChunk = Math.max(
     1,
@@ -212,7 +211,7 @@ async function execChunksInTransaction(
     await client.query("BEGIN", []);
     let total = 0;
     for (const chunk of chunks) {
-      const sql = convertCached(
+      const sql = convertToPostgresPlaceholdersCached(
         buildBatchInsertSQL(tableCols, numCols, chunk.length),
       );
       const result = await client.query(sql, chunk.flat());
@@ -246,7 +245,7 @@ export function DbUtilsNoTelemetryExecSQL(
 ): number | Promise<number> {
   const dbType = DbUtilsGetType();
   if (dbType === "postgres") {
-    const pgSql = convertCached(sql);
+    const pgSql = convertToPostgresPlaceholdersCached(sql);
     return (DbUtilsGetDatabase() as PgQueryable)
       .query(pgSql, params)
       .then((result) => result.rowCount || 0)
@@ -283,7 +282,7 @@ export function DbUtilsNoTelemetryQuerySQL(
   }
   const dbType = DbUtilsGetType();
   if (dbType === "postgres") {
-    const pgSql = convertCached(sql);
+    const pgSql = convertToPostgresPlaceholdersCached(sql);
     return (DbUtilsGetDatabase() as PgQueryable)
       .query(pgSql, params)
       .then((result) => result.rows)

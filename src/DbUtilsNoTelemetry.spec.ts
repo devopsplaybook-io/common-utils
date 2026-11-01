@@ -19,7 +19,7 @@ let currentDbType: "sqlite" | "postgres" = "sqlite";
 jest.mock("./DbUtils", () => ({
   DbUtilsGetDatabase: jest.fn(() => mockDbHandle),
   DbUtilsGetType: jest.fn(() => currentDbType),
-  convertToPostgresPlaceholders: jest.fn((sql: string) => {
+  convertToPostgresPlaceholdersCached: jest.fn((sql: string) => {
     let idx = 1;
     return sql.replace(/\?/g, () => `$${idx++}`);
   }),
@@ -318,6 +318,60 @@ describe("DbUtilsNoTelemetryExecSQL (postgres)", () => {
     await expect(
       DbUtilsNoTelemetryExecSQL("INSERT INTO pg_fail (c) VALUES (?)", ["x"]),
     ).rejects.toThrow("deadlock detected");
+  });
+
+  it("uses the shared converter for repeated and distinct statements", async () => {
+    mockQuery.mockResolvedValue({ rowCount: 1 });
+
+    await DbUtilsNoTelemetryExecSQL("INSERT INTO t (c) VALUES (?)", ["a"]);
+    await DbUtilsNoTelemetryExecSQL("INSERT INTO t (c) VALUES (?)", ["b"]);
+    await DbUtilsNoTelemetryExecSQL("DELETE FROM t WHERE id = ?", [1]);
+
+    expect(mockQuery.mock.calls.map((call) => call[0])).toEqual([
+      "INSERT INTO t (c) VALUES ($1)",
+      "INSERT INTO t (c) VALUES ($1)",
+      "DELETE FROM t WHERE id = $1",
+    ]);
+  });
+});
+
+describe("DbUtilsNoTelemetryBatchInsert tableCols validation", () => {
+  beforeEach(() => {
+    currentDbType = "sqlite";
+    mockPrepare.mockReturnValue({
+      run: jest.fn().mockReturnValue({ changes: 1 }),
+      all: jest.fn().mockReturnValue([]),
+    } as any);
+  });
+
+  it("accepts the documented identifier-list shapes", () => {
+    expect(DbUtilsNoTelemetryBatchInsert("INTO t (c1,c2)", 2, [["a", "b"]])).toBe(1);
+    expect(
+      DbUtilsNoTelemetryBatchInsert('INTO logs ("serviceName", "ts")', 2, [
+        ["svc", "2026-01-01"],
+      ]),
+    ).toBe(1);
+    expect(
+      DbUtilsNoTelemetryBatchInsert("INTO app.logs (id)", 1, [["a"]]),
+    ).toBe(1);
+    expect(
+      DbUtilsNoTelemetryBatchInsert('INTO "app"."logs" ("id")', 1, [["a"]]),
+    ).toBe(1);
+  });
+
+  it.each([
+    "INTO t (c); DROP TABLE users",
+    "INTO t (c) -- comment",
+    "INTO t (c) /* comment */",
+    "INTO t (c) VALUES (?)",
+    "INTO t",
+    "t (c)",
+  ])("rejects the injection-shaped fragment %s", (fragment) => {
+    expect(() =>
+      DbUtilsNoTelemetryBatchInsert(fragment, 1, [["a"]]),
+    ).toThrow("Invalid tableCols fragment");
+    expect(mockPrepare).not.toHaveBeenCalled();
+    expect(mockQuery).not.toHaveBeenCalled();
   });
 });
 

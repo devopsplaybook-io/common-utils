@@ -568,7 +568,8 @@ describe("PostgresDbUtils functional API", () => {
     expect(allSpansEnded()).toBe(true);
   });
 
-  it("starts and commits transactions", async () => {
+  it("starts and commits transactions and warns about the deprecated helpers", async () => {
+    mockModuleLogger.warn.mockClear();
     functionalPool().query.mockResolvedValue({ rows: [], rowCount: 0 });
 
     await PostgresDbUtilsTransactionStart(undefined);
@@ -578,6 +579,13 @@ describe("PostgresDbUtils functional API", () => {
       String(call[0]),
     );
     expect(statements).toEqual(["BEGIN", "COMMIT"]);
+    expect(mockModuleLogger.warn).toHaveBeenCalledTimes(2);
+    expect(mockModuleLogger.warn.mock.calls[0][0]).toContain(
+      "PostgresDbUtilsTransactionStart is deprecated",
+    );
+    expect(mockModuleLogger.warn.mock.calls[1][0]).toContain(
+      "PostgresDbUtilsTransactionCommit is deprecated",
+    );
     expect(allSpansEnded()).toBe(true);
   });
 
@@ -639,6 +647,18 @@ describe("PostgresDbUtils functional API", () => {
     expect(querySpan.setAttributes).toHaveBeenCalledWith({
       "db.system": "postgresql",
       "db.statement": "SELECT * FROM t",
+    });
+  });
+});
+
+describe("PostgresDbUtilsGetPool", () => {
+  it("throws a clear error instead of returning undefined before init", async () => {
+    await jest.isolateModulesAsync(async () => {
+      const freshModule =
+        require("./PostgresDbUtils") as typeof import("./PostgresDbUtils");
+      expect(() => freshModule.PostgresDbUtilsGetPool()).toThrow(
+        "Postgres pool not initialized; call PostgresDbUtilsInit first",
+      );
     });
   });
 });

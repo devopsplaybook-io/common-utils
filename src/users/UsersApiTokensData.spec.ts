@@ -11,7 +11,10 @@ jest.mock("../DbUtils", () => ({
   DbUtilsExecSQL: (...args: unknown[]) => mockExec(...args),
 }));
 
-import { StandardTracer } from "@devopsplaybook.io/otel-utils";
+import {
+  StandardLogger,
+  StandardTracer,
+} from "@devopsplaybook.io/otel-utils";
 import { UserApiToken } from "./UserApiToken";
 import {
   UsersApiTokensDataAdd,
@@ -32,6 +35,11 @@ const mockTracer = {
   startSpan: () => ({ end: () => undefined }),
 } as unknown as StandardTracer;
 
+const mockModuleLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+const mockStandardLogger = {
+  createModuleLogger: jest.fn(() => mockModuleLogger),
+} as unknown as StandardLogger;
+
 function makeToken(overrides: Partial<UserApiToken> = {}): UserApiToken {
   const apiToken = new UserApiToken();
   apiToken.name = "CI token";
@@ -42,12 +50,13 @@ function makeToken(overrides: Partial<UserApiToken> = {}): UserApiToken {
 }
 
 beforeAll(() => {
-  UsersApiTokensDataSetOTel(mockTracer);
+  UsersApiTokensDataSetOTel(mockTracer, mockStandardLogger);
 });
 
 beforeEach(() => {
   mockedQuery.mockReset();
   mockedExec.mockReset();
+  mockModuleLogger.error.mockClear();
   mockedQuery.mockResolvedValue([]);
   mockedExec.mockResolvedValue(undefined);
 });
@@ -267,11 +276,63 @@ describe("UsersApiTokensData", () => {
         false,
       ]);
 
-      // The failed probe is sticky: later calls do not re-probe.
+      // A recognised missing-column failure stays cached: no re-probe.
       await expect(
         freshModule.UsersApiTokensDataSupportsOptionalColumns(undefined),
       ).resolves.toBe(false);
       expect(mockedQuery).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("should not cache an unexpected probe failure and should retry", async () => {
+    await jest.isolateModulesAsync(async () => {
+      const freshModule =
+        require("./UsersApiTokensData") as typeof import("./UsersApiTokensData");
+      freshModule.UsersApiTokensDataSetOTel(mockTracer, mockStandardLogger);
+      mockedQuery.mockRejectedValueOnce(new Error("connection lost"));
+
+      await expect(
+        freshModule.UsersApiTokensDataSupportsOptionalColumns(undefined),
+      ).rejects.toThrow("connection lost");
+      expect(mockModuleLogger.error).toHaveBeenCalledTimes(1);
+
+      await expect(
+        freshModule.UsersApiTokensDataSupportsOptionalColumns(undefined),
+      ).resolves.toBe(true);
+      expect(mockedQuery).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("should propagate a transient probe failure from Add without inserting", async () => {
+    await jest.isolateModulesAsync(async () => {
+      const freshModule =
+        require("./UsersApiTokensData") as typeof import("./UsersApiTokensData");
+      freshModule.UsersApiTokensDataSetOTel(mockTracer, mockStandardLogger);
+      mockedQuery.mockRejectedValueOnce(new Error("connection lost"));
+
+      const apiToken = makeToken({ expiresAt: "2999-01-01T00:00:00.000Z" });
+      await expect(
+        freshModule.UsersApiTokensDataAdd(undefined, apiToken),
+      ).rejects.toThrow("connection lost");
+      expect(mockedExec).not.toHaveBeenCalled();
+    });
+  });
+
+  it("should reject SetLastUsed on a transient probe failure", async () => {
+    await jest.isolateModulesAsync(async () => {
+      const freshModule =
+        require("./UsersApiTokensData") as typeof import("./UsersApiTokensData");
+      freshModule.UsersApiTokensDataSetOTel(mockTracer, mockStandardLogger);
+      mockedQuery.mockRejectedValueOnce(new Error("connection lost"));
+
+      await expect(
+        freshModule.UsersApiTokensDataSetLastUsed(
+          undefined,
+          "token-1",
+          "2026-09-14T12:00:00.000Z",
+        ),
+      ).rejects.toThrow("connection lost");
+      expect(mockedExec).not.toHaveBeenCalled();
     });
   });
 

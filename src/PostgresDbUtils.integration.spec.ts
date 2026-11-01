@@ -19,6 +19,12 @@ import {
   PostgresDbUtilsWithAdvisoryLock,
   PostgresSchemaDbUtils,
 } from "./PostgresDbUtils";
+import { DbUtilsInit } from "./DbUtils";
+import { User } from "./users/User";
+import {
+  UsersDataAddIfEmpty,
+  UsersDataSetOTel,
+} from "./users/UsersData";
 
 /**
  * Integration tests against a real PostgreSQL server
@@ -81,6 +87,16 @@ function writeMigration(name: string, sql: string): void {
   nodeFs.writeFileSync(path.join(sqlDir, name), sql);
 }
 
+function makeBootstrapUser(id: string, name: string): User {
+  const user = new User();
+  user.id = id;
+  user.name = name;
+  user.passwordEncrypted = `hash-${id}`;
+  user.role = "admin";
+  user.scopes = [];
+  return user;
+}
+
 /** `init-0000.sql` plus `count` migrations, each logging its own version. */
 function writeMigrationSet(count: number): void {
   writeMigration("init-0000.sql", MIGRATION_0000);
@@ -101,10 +117,14 @@ async function appliedVersions(): Promise<number[]> {
 }
 
 async function endCurrentPool(): Promise<void> {
-  const currentPool = PostgresDbUtilsGetPool();
-  if (currentPool) {
-    await currentPool.end().catch(() => undefined);
+  let currentPool: Pool | undefined;
+  try {
+    currentPool = PostgresDbUtilsGetPool();
+  } catch {
+    // Not initialized (e.g. a failed init): nothing to close.
+    return;
   }
+  await currentPool.end().catch(() => undefined);
 }
 
 /**
@@ -135,6 +155,7 @@ describeWithDocker("PostgresDbUtils integration (real PostgreSQL)", () => {
   beforeAll(async () => {
     container = await new PostgreSqlContainer("postgres:18").start();
     PostgresDbUtilsSetOTel(mockTracer, mockStandardLogger);
+    UsersDataSetOTel(mockTracer);
   });
 
   afterAll(async () => {
@@ -267,6 +288,31 @@ describeWithDocker("PostgresDbUtils integration (real PostgreSQL)", () => {
     expect(new Set(events.map((event) => event.split(":")[0]))).toEqual(
       new Set(["a", "b"]),
     );
+  });
+
+  it("serialises UsersDataAddIfEmpty so only one bootstrap admin is created", async () => {
+    writeMigration("init-0000.sql", MIGRATION_0000);
+    writeMigration(
+      "init-0001.sql",
+      'CREATE TABLE users ("id" TEXT PRIMARY KEY, "name" TEXT NOT NULL, "passwordEncrypted" TEXT, "role" TEXT, "scopes" TEXT, "tokenVersion" INTEGER DEFAULT 0);',
+    );
+    await DbUtilsInit(
+      undefined as never,
+      { ...makeConfig(), DATABASE_TYPE: "postgres" } as never,
+      sqlDir,
+    );
+
+    const results = await Promise.all([
+      UsersDataAddIfEmpty(undefined, makeBootstrapUser("user-a", "alice")),
+      UsersDataAddIfEmpty(undefined, makeBootstrapUser("user-b", "bob")),
+    ]);
+
+    expect(results.sort()).toEqual([false, true]);
+    const rows = await PostgresDbUtilsQuerySQL(
+      undefined,
+      "SELECT COUNT(*)::int AS count FROM users",
+    );
+    expect(rows[0].count).toBe(1);
   });
 
   it("initialises a schema, applies migrations and serves both pools", async () => {

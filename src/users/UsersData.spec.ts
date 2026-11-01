@@ -2,16 +2,35 @@ import * as nodeFs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { StandardLogger, StandardTracer } from "@devopsplaybook.io/otel-utils";
+
+// Wrap DbUtilsWithLock so tests can assert the advisory-lock contract while
+// every other DbUtils export keeps its real implementation.
+jest.mock("../DbUtils", () => {
+  const actual = jest.requireActual("../DbUtils") as typeof import("../DbUtils");
+  return {
+    ...actual,
+    DbUtilsWithLock: jest.fn(
+      (
+        lock: string,
+        callback: () => Promise<unknown>,
+        context?: unknown,
+      ) => actual.DbUtilsWithLock(lock, callback, context as never),
+    ),
+  };
+});
+
 import {
   DbUtilsExecSQL,
   DbUtilsGetDatabase,
   DbUtilsInit,
   DbUtilsQuerySQL,
   DbUtilsSetOTel,
+  DbUtilsWithLock,
 } from "../DbUtils";
 import { User } from "./User";
 import {
   UsersDataAdd,
+  UsersDataAddIfEmpty,
   UsersDataBumpTokenVersion,
   UsersDataCount,
   UsersDataCountAdmins,
@@ -251,6 +270,50 @@ describe("UsersData CRUD (real SQLite database)", () => {
     const getSpan = mockSpans.find((span) => span.name === "UsersDataGet");
     expect(getSpan.end).toHaveBeenCalledTimes(1);
     expect(allSpansEnded()).toBe(true);
+  });
+});
+
+describe("UsersDataAddIfEmpty (real SQLite database)", () => {
+  const mockedWithLock = DbUtilsWithLock as jest.Mock;
+
+  beforeEach(async () => {
+    mockedWithLock.mockClear();
+    await initTempDb();
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it("inserts the first user and refuses a later one", async () => {
+    expect(
+      await UsersDataAddIfEmpty(undefined, makeUser("user-1", "alice", "admin")),
+    ).toBe(true);
+    expect(
+      await UsersDataAddIfEmpty(undefined, makeUser("user-2", "bob", "admin")),
+    ).toBe(false);
+    expect(await UsersDataCount(undefined)).toBe(1);
+  });
+
+  it("serialises through the users_bootstrap lock by default", async () => {
+    expect(
+      await UsersDataAddIfEmpty(undefined, makeUser("user-1", "alice", "admin")),
+    ).toBe(true);
+
+    expect(mockedWithLock).toHaveBeenCalledTimes(1);
+    expect(mockedWithLock.mock.calls[0][0]).toBe("users_bootstrap");
+  });
+
+  it("skips the lock when the caller already holds it", async () => {
+    expect(
+      await UsersDataAddIfEmpty(
+        undefined,
+        makeUser("user-1", "alice", "admin"),
+        { lock: false },
+      ),
+    ).toBe(true);
+
+    expect(mockedWithLock).not.toHaveBeenCalled();
   });
 });
 

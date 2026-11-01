@@ -17,6 +17,18 @@ class TestConfig extends ConfigBase {
   }
 }
 
+/** Subclass with collection defaults to prove reload deep-clones them. */
+class CollectionConfig extends ConfigBase {
+  public ARRAY_SETTING: string[] = ["a"];
+  public OBJECT_SETTING = { nested: { value: 1 } };
+
+  constructor(configFile?: string) {
+    super("test-service", configFile);
+    this.addConfigField({ field: "ARRAY_SETTING" });
+    this.addConfigField({ field: "OBJECT_SETTING" });
+  }
+}
+
 describe("ConfigBase", () => {
   let tmpDir: string;
   let configPath: string;
@@ -329,5 +341,95 @@ describe("ConfigBase: strict coercion and field registration", () => {
     const config = new TestConfig(path.join(tmpDir, "absent.json"));
     await config.reload((msg) => logs.push(msg));
     expect(logs.some((line) => line.includes("could not be read"))).toBe(false);
+  });
+});
+
+describe("ConfigBase: reload restores defaults", () => {
+  let tmpDir: string;
+  let configPath: string;
+
+  beforeEach(() => {
+    tmpDir = fse.mkdtempSync(path.join(os.tmpdir(), "config-test-"));
+    configPath = path.join(tmpDir, "config.json");
+  });
+
+  afterEach(() => {
+    fse.removeSync(tmpDir);
+    delete process.env.MY_SETTING;
+  });
+
+  it("restores the default when the environment variable is unset", async () => {
+    process.env.MY_SETTING = "from_env";
+    const config = new TestConfig(configPath);
+    await config.reload();
+    expect(config.MY_SETTING).toBe("from_env");
+
+    delete process.env.MY_SETTING;
+    await config.reload();
+    expect(config.MY_SETTING).toBe("default_value");
+  });
+
+  it("restores the default when the key is removed from the config file", async () => {
+    fse.writeJsonSync(configPath, { MY_SETTING: "from_file" });
+    const config = new TestConfig(configPath);
+    await config.reload();
+    expect(config.MY_SETTING).toBe("from_file");
+
+    fse.writeJsonSync(configPath, {});
+    await config.reload();
+    expect(config.MY_SETTING).toBe("default_value");
+  });
+
+  it("restores a default after a temporary environment override disappears", async () => {
+    const config = new TestConfig(configPath);
+    await config.reload();
+
+    process.env.MY_SETTING = "temporary";
+    await config.reload();
+    expect(config.MY_SETTING).toBe("temporary");
+
+    delete process.env.MY_SETTING;
+    await config.reload();
+    expect(config.MY_SETTING).toBe("default_value");
+  });
+
+  it("deep-clones array and object defaults on every reload", async () => {
+    const config = new CollectionConfig(configPath);
+    await config.reload();
+    expect(config.ARRAY_SETTING).toEqual(["a"]);
+    expect(config.OBJECT_SETTING).toEqual({ nested: { value: 1 } });
+
+    config.ARRAY_SETTING.push("leaked");
+    config.OBJECT_SETTING.nested.value = 99;
+
+    await config.reload();
+    expect(config.ARRAY_SETTING).toEqual(["a"]);
+    expect(config.OBJECT_SETTING).toEqual({ nested: { value: 1 } });
+  });
+
+  it("uses the new default of a re-registered field", async () => {
+    class OverriddenConfig extends TestConfig {
+      constructor() {
+        super();
+        this.MY_SETTING = "sub_value";
+        this.addConfigField({ field: "MY_SETTING" });
+      }
+    }
+    const config = new OverriddenConfig();
+    await config.reload();
+    expect(config.MY_SETTING).toBe("sub_value");
+  });
+
+  it("reports the defaults source and the default value truthfully", async () => {
+    process.env.MY_SETTING = "from_env";
+    const config = new TestConfig(configPath);
+    await config.reload();
+
+    delete process.env.MY_SETTING;
+    const logs: string[] = [];
+    await config.reload((msg) => logs.push(msg));
+    const settingLog = logs.find((line) => line.includes("MY_SETTING"));
+    expect(settingLog).toContain("default_value");
+    expect(settingLog).toContain("(from defaults)");
   });
 });

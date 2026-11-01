@@ -155,6 +155,17 @@ export async function SqlDbUtilsInit(
   const span = tracer.startSpan("SqlDbUtilsInit", context);
   try {
     await fs.ensureDir(config.DATA_DIR);
+    // Re-initialising must not leak the previous handle (and its WAL
+    // connection); closing it also invalidates its prepared statements.
+    if (database) {
+      try {
+        database.close();
+      } catch (error) {
+        logger.warn(
+          `Failed to close the previous SQLite handle: ${(error as Error).message}`,
+        );
+      }
+    }
     database = new Database(`${config.DATA_DIR}/database.db`);
     applyPragmas(config);
     preparedStatements = new Map();
@@ -273,7 +284,7 @@ export function SqlDbUtilsQuerySQL(
     "db.statement": truncateDbStatement(sql),
   });
   if (debug) {
-    console.log(sql);
+    logger.info(sql);
   }
   try {
     const stmt = prepareCached(sql);

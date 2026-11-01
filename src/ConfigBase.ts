@@ -134,6 +134,26 @@ function coerceValue(value: unknown, defaultValue: any, field: string): any {
   }
 }
 
+/**
+ * Deep-clone a configuration default so reloaded values never share an array
+ * or object with the registered default (mutating one live value must not
+ * leak into a later reload). Primitives are returned as-is.
+ */
+function cloneConfigValue<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((entry) => cloneConfigValue(entry)) as unknown as T;
+  }
+  if (value !== null && typeof value === "object") {
+    const source = value as Record<string, unknown>;
+    const copy: Record<string, unknown> = {};
+    for (const key of Object.keys(source)) {
+      copy[key] = cloneConfigValue(source[key]);
+    }
+    return copy as T;
+  }
+  return value;
+}
+
 /** Cached library version; the manifest is read at most once per process. */
 let detectedVersion: string | undefined;
 
@@ -372,20 +392,22 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       existing.envAliases = [
         ...new Set([...existing.envAliases, ...(def.envAliases ?? [])]),
       ];
-      existing.defaultValue = (this as any)[def.field];
+      existing.defaultValue = cloneConfigValue((this as any)[def.field]);
       return;
     }
     this._fields.push({
       field: def.field,
       sensitive: def.sensitive ?? false,
       envAliases: def.envAliases ?? [],
-      defaultValue: (this as any)[def.field],
+      defaultValue: cloneConfigValue((this as any)[def.field]),
     });
   }
 
   /**
    * Load (or reload) configuration from the JSON file and environment variables.
-   * Environment variables always take precedence over file values.
+   * Environment variables always take precedence over file values. Fields that
+   * are no longer present in either layer are restored to their registered
+   * defaults (arrays and objects are deep-cloned, never shared).
    *
    * @param logger  Optional log callback `(message: string) => void`.
    *                When omitted nothing is logged (useful in tests).
@@ -415,6 +437,10 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       let from = "defaults";
       let foundValue: string | undefined;
       let usedAlias = false;
+
+      // Start from the registered default so a value that disappeared from
+      // the environment or the config file is cleared instead of lingering.
+      (this as any)[field] = cloneConfigValue(defaultValue);
 
       // 1. Primary environment variable name
       if (process.env[field] !== undefined) {
