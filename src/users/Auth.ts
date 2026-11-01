@@ -21,10 +21,23 @@ export interface AuthConfig {
   DATABASE_TYPE: "sqlite" | "postgres";
   /** Opt-in JWT revocation (requires the `users.tokenVersion` migration). */
   JWT_REVOCATION_ENABLED?: boolean;
+  /**
+   * Absolute session lifetime in seconds measured from the first login
+   * (`defaults to 30 days; <= 0` disables the cap).
+   */
+  JWT_SESSION_MAX_DURATION?: number;
+  /** JWT `iss` claim (`""` disables it; defaults to `devopsplaybook.io`). */
+  JWT_ISSUER?: string;
+  /** JWT `aud` claim (`""` disables it; defaults to `devopsplaybook.io`). */
+  JWT_AUDIENCE?: string;
   /** Per-user API token cap (defaults to 100 when unset). */
   API_TOKENS_MAX_PER_USER?: number;
   /** Login attempts allowed per window (defaults to 10; <= 0 disables). */
   AUTH_RATE_LIMIT_LOGIN_MAX?: number;
+  /** Per-IP login attempts allowed per window (defaults to 0 = disabled). */
+  AUTH_RATE_LIMIT_LOGIN_IP_MAX?: number;
+  /** Status-endpoint reads allowed per window (defaults to 60; <= 0 disables). */
+  AUTH_RATE_LIMIT_STATUS_MAX?: number;
   /** Session refreshes allowed per window (defaults to 60; <= 0 disables). */
   AUTH_RATE_LIMIT_REFRESH_MAX?: number;
   /** Rate-limit window in seconds (defaults to 60). */
@@ -50,6 +63,10 @@ const DEFAULT_API_TOKENS_MAX_PER_USER = 100;
 const DEFAULT_RATE_LIMIT_LOGIN_MAX = 10;
 const DEFAULT_RATE_LIMIT_REFRESH_MAX = 60;
 const DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60;
+const DEFAULT_RATE_LIMIT_STATUS_MAX = 60;
+const DEFAULT_JWT_SESSION_MAX_DURATION = 30 * 24 * 3600;
+const DEFAULT_JWT_ISSUER = "devopsplaybook.io";
+const DEFAULT_JWT_AUDIENCE = "devopsplaybook.io";
 
 /**
  * Rejected non-JWT credentials are remembered for a short time so that a
@@ -107,6 +124,33 @@ export function AuthGetRateLimitLoginMax(): number {
 /** Configured session-refresh rate limit (`AUTH_RATE_LIMIT_REFRESH_MAX`). */
 export function AuthGetRateLimitRefreshMax(): number {
   return config?.AUTH_RATE_LIMIT_REFRESH_MAX ?? DEFAULT_RATE_LIMIT_REFRESH_MAX;
+}
+
+/** Configured per-IP login rate limit (`AUTH_RATE_LIMIT_LOGIN_IP_MAX`). */
+export function AuthGetRateLimitLoginIpMax(): number {
+  return config?.AUTH_RATE_LIMIT_LOGIN_IP_MAX ?? 0;
+}
+
+/** Configured status-endpoint rate limit (`AUTH_RATE_LIMIT_STATUS_MAX`). */
+export function AuthGetRateLimitStatusMax(): number {
+  return config?.AUTH_RATE_LIMIT_STATUS_MAX ?? DEFAULT_RATE_LIMIT_STATUS_MAX;
+}
+
+/** Configured absolute session lifetime in seconds (`JWT_SESSION_MAX_DURATION`). */
+export function AuthGetJwtSessionMaxDuration(): number {
+  return (
+    config?.JWT_SESSION_MAX_DURATION ?? DEFAULT_JWT_SESSION_MAX_DURATION
+  );
+}
+
+/** Configured JWT issuer (`JWT_ISSUER`, `""` disables the claim). */
+export function AuthGetJwtIssuer(): string {
+  return config?.JWT_ISSUER ?? DEFAULT_JWT_ISSUER;
+}
+
+/** Configured JWT audience (`JWT_AUDIENCE`, `""` disables the claim). */
+export function AuthGetJwtAudience(): string {
+  return config?.JWT_AUDIENCE ?? DEFAULT_JWT_AUDIENCE;
 }
 
 /** Configured rate-limit window in seconds (`AUTH_RATE_LIMIT_WINDOW_SECONDS`). */
@@ -177,10 +221,46 @@ export async function AuthInit(
   }
 }
 
-export async function AuthGenerateJWT(user: User): Promise<string> {
+/** Optional parameters for {@link AuthGenerateJWT}. */
+export interface AuthGenerateJWTOptions {
+  /**
+   * Mint time of the current session, in seconds since the epoch. Renewals
+   * must carry the original value so `JWT_SESSION_MAX_DURATION` bounds the
+   * session independently of how often it is refreshed.
+   */
+  sessionStartedAt?: number;
+}
+
+/**
+ * Sign an HS256 JWT for a user (admins get all scopes).
+ *
+ * The token carries `iat`, `exp`, `sessionStartedAt`, `userId`, `userName`,
+ * `role`, `scopes` and `tokenVersion`. `iss`/`aud` are set unless the
+ * corresponding config field is empty, and a random `jti` is always added.
+ * `exp` is `JWT_VALIDITY_DURATION` from now, capped by
+ * `sessionStartedAt + JWT_SESSION_MAX_DURATION` when that limit is enabled.
+ */
+export async function AuthGenerateJWT(
+  user: User,
+  options: AuthGenerateJWTOptions = {},
+): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  const sessionStartedAt = options.sessionStartedAt ?? now;
+  const sessionMaxDuration = AuthGetJwtSessionMaxDuration();
+  const expiresAt =
+    sessionMaxDuration > 0
+      ? Math.min(
+          now + config.JWT_VALIDITY_DURATION,
+          sessionStartedAt + sessionMaxDuration,
+        )
+      : now + config.JWT_VALIDITY_DURATION;
+  const issuer = AuthGetJwtIssuer();
+  const audience = AuthGetJwtAudience();
   return jwt.sign(
     {
-      exp: Math.floor(Date.now() / 1000) + config.JWT_VALIDITY_DURATION,
+      exp: expiresAt,
+      iat: now,
+      sessionStartedAt,
       userId: user.id,
       userName: user.name,
       role: user.role,
@@ -188,29 +268,84 @@ export async function AuthGenerateJWT(user: User): Promise<string> {
       tokenVersion: user.tokenVersion ?? 0,
     },
     config.JWT_KEY,
-    { algorithm: "HS256" },
+    {
+      algorithm: "HS256",
+      jwtid: randomUUID(),
+      ...(issuer !== "" ? { issuer } : {}),
+      ...(audience !== "" ? { audience } : {}),
+    },
   );
 }
 
 /**
- * Decode credentials from request, caching result on req._jwtPayload to
- * avoid redundant resolution when multiple auth functions are called per
- * request.
+ * Validate the optional `iss`/`aud` claims. Missing claims are accepted so
+ * tokens issued before 2.6.0 keep working until they expire; a claim that is
+ * present must match the configured value. `aud` may be a string or an array.
+ */
+function claimsAccepted(info: any): boolean {
+  const expectedIssuer = AuthGetJwtIssuer();
+  if (info.iss !== undefined) {
+    if (expectedIssuer === "" || info.iss !== expectedIssuer) {
+      return false;
+    }
+  }
+  const expectedAudience = AuthGetJwtAudience();
+  if (info.aud !== undefined) {
+    if (expectedAudience === "") {
+      return false;
+    }
+    const audiences = Array.isArray(info.aud) ? info.aud : [info.aud];
+    if (!audiences.includes(expectedAudience)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Whether a decoded session exceeded the absolute session lifetime
+ * (`JWT_SESSION_MAX_DURATION`, `<= 0` disables the check). The start is the
+ * `sessionStartedAt` claim, falling back to `iat` for tokens issued before
+ * 2.6.0. An unknown start is not considered expired.
+ */
+export function AuthSessionExpired(session: UserSession): boolean {
+  const sessionMaxDuration = AuthGetJwtSessionMaxDuration();
+  if (sessionMaxDuration <= 0) {
+    return false;
+  }
+  const startedAt = session.sessionStartedAt ?? session.issuedAt;
+  if (startedAt === undefined) {
+    return false;
+  }
+  return Math.floor(Date.now() / 1000) >= startedAt + sessionMaxDuration;
+}
+
+/**
+ * Decode credentials from request, caching the resolution on the request
+ * (`req._jwtResolved` / `req._jwtPayload`) so multiple auth helpers called
+ * per request never resolve the credential twice. Rejections are cached too:
+ * `_jwtPayload` stays `null`, so a revoked or invalid credential is not
+ * re-verified by a later guard or route handler (see H1/L11).
  *
- * A `Bearer` credential is first verified as a JWT (HS256 only). When JWT
+ * A `Bearer` credential is first verified as a JWT (HS256 only); the
+ * optional `iss`/`aud` claims are validated when present. When JWT
  * verification fails, the credential is resolved as a user API token: the
  * value is SHA-256 hashed and looked up in `users_api_tokens`; on match, a
  * payload mirroring the owning user's live role and scopes is built (valid
  * until the token is revoked or expires).
  *
  * When `JWT_REVOCATION_ENABLED` is on, the live user is loaded (and cached on
- * the request) after verification and the token is rejected when the user is
- * gone or its `tokenVersion` differs from the claim.
+ * the request) before the token is accepted, and the token is rejected when
+ * the user is gone or its `tokenVersion` differs from the claim. The
+ * rejection is cached, so a stale credential cannot authorize any later
+ * helper call within the same request.
  */
 async function jwtDecodeCached(req: any): Promise<any | null> {
-  if (req._jwtPayload) {
-    return req._jwtPayload;
+  if (req._jwtResolved) {
+    return req._jwtPayload ?? null;
   }
+  req._jwtResolved = true;
+  req._jwtPayload = null;
   const token = extractBearerToken(req.headers?.authorization);
   if (!token) {
     return null;
@@ -222,8 +357,12 @@ async function jwtDecodeCached(req: any): Promise<any | null> {
     const apiInfo = await resolveApiToken(req, token);
     if (apiInfo) {
       req._jwtPayload = apiInfo;
+      req._authCredentialType = "api_token";
       return apiInfo;
     }
+    return null;
+  }
+  if (!claimsAccepted(info)) {
     return null;
   }
   if (config.JWT_REVOCATION_ENABLED) {
@@ -232,10 +371,13 @@ async function jwtDecodeCached(req: any): Promise<any | null> {
       !user ||
       Number(user.tokenVersion ?? 0) !== Number(info.tokenVersion ?? 0)
     ) {
+      // Defence in depth: never leave the stale user reachable on the request.
+      req._authLiveUser = null;
       return null;
     }
   }
   req._jwtPayload = info;
+  req._authCredentialType = "jwt";
   return info;
 }
 
@@ -266,11 +408,12 @@ async function loadLiveUser(req: any, info: any): Promise<User | null> {
  * `JWT_REVOCATION_ENABLED`) the token was issued before a role/scope/password
  * change. Authorization must use this function (or the guards below), not the
  * role/scopes claims of `AuthGetUserSession`.
+ *
+ * Credential resolution always goes through {@link jwtDecodeCached} first, so
+ * a rejection (including a stale `tokenVersion`) is cached and cannot be
+ * bypassed by an earlier live-user read.
  */
 export async function AuthGetLiveUser(req: any): Promise<User | null> {
-  if (req._authLiveUserLoaded) {
-    return req._authLiveUser;
-  }
   const info = await jwtDecodeCached(req);
   if (!info) {
     return null;
@@ -435,6 +578,11 @@ export async function AuthHasScope(
  * Decoded session claims for display purposes only. Authorization must never
  * rely on these role/scopes claims: use `AuthGetLiveUser` or the guards,
  * which resolve the live user from the database.
+ *
+ * The credential resolution is cached per request (including rejections), so
+ * a revoked token yields `isAuthenticated: false` here and cannot be reused
+ * by a guard later in the same request. `credentialType`, `issuedAt`,
+ * `expiresAt` and `sessionStartedAt` are display metadata only.
  */
 export async function AuthGetUserSession(req: any): Promise<UserSession> {
   const userSession: UserSession = { isAuthenticated: false };
@@ -445,6 +593,15 @@ export async function AuthGetUserSession(req: any): Promise<UserSession> {
     userSession.role = info.role;
     userSession.scopes = info.scopes;
     userSession.isAuthenticated = true;
+    userSession.credentialType = req._authCredentialType;
+    userSession.issuedAt =
+      typeof info.iat === "number" ? info.iat : undefined;
+    userSession.expiresAt =
+      typeof info.exp === "number" ? info.exp : undefined;
+    userSession.sessionStartedAt = userSession.issuedAt;
+    if (typeof info.sessionStartedAt === "number") {
+      userSession.sessionStartedAt = info.sessionStartedAt;
+    }
   }
   return userSession;
 }

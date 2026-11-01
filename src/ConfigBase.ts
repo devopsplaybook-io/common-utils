@@ -57,11 +57,21 @@ export interface ConfigCommonInterface
   API_PORT: number;
   JWT_VALIDITY_DURATION: number;
   JWT_REVOCATION_ENABLED: boolean;
+  /** Absolute session lifetime in seconds (`<= 0` disables the cap). */
+  JWT_SESSION_MAX_DURATION: number;
+  /** JWT `iss` claim (`""` disables it). */
+  JWT_ISSUER: string;
+  /** JWT `aud` claim (`""` disables it). */
+  JWT_AUDIENCE: string;
   API_TOKENS_MAX_PER_USER: number;
   /** Login attempts allowed per rate-limit window (`<= 0` disables). */
   AUTH_RATE_LIMIT_LOGIN_MAX: number;
+  /** Per-IP login attempts allowed per rate-limit window (`<= 0` disables). */
+  AUTH_RATE_LIMIT_LOGIN_IP_MAX: number;
   /** Session refreshes allowed per rate-limit window (`<= 0` disables). */
   AUTH_RATE_LIMIT_REFRESH_MAX: number;
+  /** Status-endpoint reads allowed per rate-limit window (`<= 0` disables). */
+  AUTH_RATE_LIMIT_STATUS_MAX: number;
   /** Rate-limit window in seconds. */
   AUTH_RATE_LIMIT_WINDOW_SECONDS: number;
   /** Minimum password length (`0` = only non-empty passwords). */
@@ -165,19 +175,36 @@ export abstract class ConfigBase implements ConfigCommonInterface {
   // -- Common server fields --
   public CONFIG_FILE: string;
   public API_PORT = 8080;
-  public JWT_VALIDITY_DURATION = 3 * 31 * 24 * 3600;
+  /**
+   * Access-token lifetime in seconds. Defaults to 1 hour in 2.6.0 (it was
+   * 93 days before); renew with `POST /session/refresh`.
+   */
+  public JWT_VALIDITY_DURATION = 3600;
   /**
    * Opt-in JWT revocation: when enabled, every JWT request re-reads the user
    * and rejects tokens whose `tokenVersion` claim is stale. Requires the
    * `users.tokenVersion` migration (see README).
    */
   public JWT_REVOCATION_ENABLED = false;
+  /**
+   * Absolute session lifetime in seconds from the first login. Bounds
+   * renewals even when the access token is refreshed. `<= 0` disables it.
+   */
+  public JWT_SESSION_MAX_DURATION = 30 * 24 * 3600;
+  /** JWT `iss` claim. `""` disables it. */
+  public JWT_ISSUER = "devopsplaybook.io";
+  /** JWT `aud` claim. `""` disables it. */
+  public JWT_AUDIENCE = "devopsplaybook.io";
   /** Maximum number of API tokens a single user may create. */
   public API_TOKENS_MAX_PER_USER = 100;
   /** Login attempts allowed per rate-limit window (per IP + username). */
   public AUTH_RATE_LIMIT_LOGIN_MAX = 10;
+  /** Per-IP login attempts allowed per rate-limit window (`<= 0` disables). */
+  public AUTH_RATE_LIMIT_LOGIN_IP_MAX = 0;
   /** Session refreshes allowed per rate-limit window (per IP). */
   public AUTH_RATE_LIMIT_REFRESH_MAX = 60;
+  /** Status-endpoint reads allowed per rate-limit window (`<= 0` disables). */
+  public AUTH_RATE_LIMIT_STATUS_MAX = 60;
   /** Rate-limit window in seconds. */
   public AUTH_RATE_LIMIT_WINDOW_SECONDS = 60;
   /** Minimum password length enforced by the auth module. */
@@ -253,9 +280,14 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       { field: "API_PORT" },
       { field: "JWT_VALIDITY_DURATION" },
       { field: "JWT_REVOCATION_ENABLED" },
+      { field: "JWT_SESSION_MAX_DURATION" },
+      { field: "JWT_ISSUER" },
+      { field: "JWT_AUDIENCE" },
       { field: "API_TOKENS_MAX_PER_USER" },
       { field: "AUTH_RATE_LIMIT_LOGIN_MAX" },
+      { field: "AUTH_RATE_LIMIT_LOGIN_IP_MAX" },
       { field: "AUTH_RATE_LIMIT_REFRESH_MAX" },
+      { field: "AUTH_RATE_LIMIT_STATUS_MAX" },
       { field: "AUTH_RATE_LIMIT_WINDOW_SECONDS" },
       { field: "PASSWORD_MIN_LENGTH" },
       { field: "API_TOKENS_REVOKE_ON_PASSWORD_CHANGE" },
