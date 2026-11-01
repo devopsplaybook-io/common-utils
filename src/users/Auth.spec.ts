@@ -45,6 +45,7 @@ import {
 } from "./Auth";
 import { User } from "./User";
 import { UserApiToken } from "./UserApiToken";
+import { UserPasswordGetBcryptRounds } from "./UserPassword";
 import {
   UsersApiTokensDataGetByTokenHash,
   UsersApiTokensDataSetLastUsed,
@@ -462,6 +463,21 @@ describe("AuthInit JWT key precedence", () => {
     expect(mockedQuery).not.toHaveBeenCalled();
     expect(mockedExec).not.toHaveBeenCalled();
     expect(mockedWithLock).not.toHaveBeenCalled();
+  });
+});
+
+describe("AuthInit password policy", () => {
+  it("should pass the configured bcrypt cost to the password module", async () => {
+    await AuthInit(
+      undefined as never,
+      makeConfig({ BCRYPT_ROUNDS: 12 }),
+      APP_SCOPES,
+    );
+    expect(UserPasswordGetBcryptRounds()).toBe(12);
+
+    // Restore the default for the rest of the suite.
+    await AuthInit(undefined as never, makeConfig(), APP_SCOPES);
+    expect(UserPasswordGetBcryptRounds()).toBe(10);
   });
 });
 

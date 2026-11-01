@@ -1,11 +1,28 @@
+// Wrap `genSalt` so tests can observe the configured cost: the real function
+// is still called, and the mock instance is the one the module uses.
+jest.mock("bcrypt", () => {
+  const actual = jest.requireActual("bcrypt") as typeof import("bcrypt");
+  return {
+    ...actual,
+    genSalt: jest.fn(actual.genSalt),
+  };
+});
+
+import * as bcrypt from "bcrypt";
 import { User } from "./User";
 import {
+  BCRYPT_ROUNDS_DEFAULT,
   UserPasswordCheckPassword,
   UserPasswordCheckPasswordDummy,
+  UserPasswordGetBcryptRounds,
   UserPasswordSetPassword,
   UserPasswordSetPolicy,
   UserPasswordValidate,
 } from "./UserPassword";
+
+beforeEach(() => {
+  jest.clearAllMocks();
+});
 
 test("Password should be successfully verified if it's the same", async () => {
   const password = "testPassword1234";
@@ -80,6 +97,10 @@ describe("UserPasswordSetPassword policy enforcement", () => {
 });
 
 describe("UserPasswordCheckPasswordDummy", () => {
+  afterEach(() => {
+    UserPasswordSetPolicy({ bcryptRounds: BCRYPT_ROUNDS_DEFAULT });
+  });
+
   it("resolves without revealing whether the account exists", async () => {
     await expect(
       UserPasswordCheckPasswordDummy("anything"),
@@ -87,5 +108,47 @@ describe("UserPasswordCheckPasswordDummy", () => {
     await expect(
       UserPasswordCheckPasswordDummy(undefined),
     ).resolves.toBeUndefined();
+  });
+
+  it("uses the configured bcrypt cost for the timing-equalizing operation", async () => {
+    UserPasswordSetPolicy({ bcryptRounds: 12 });
+
+    await UserPasswordCheckPasswordDummy("anything");
+
+    expect(bcrypt.genSalt).toHaveBeenCalledWith(12);
+  });
+});
+
+describe("UserPassword bcrypt cost", () => {
+  afterEach(() => {
+    UserPasswordSetPolicy({ bcryptRounds: BCRYPT_ROUNDS_DEFAULT });
+  });
+
+  it("defaults to cost 10", () => {
+    expect(BCRYPT_ROUNDS_DEFAULT).toBe(10);
+    expect(UserPasswordGetBcryptRounds()).toBe(BCRYPT_ROUNDS_DEFAULT);
+  });
+
+  it("uses the configured cost for new hashes", async () => {
+    UserPasswordSetPolicy({ bcryptRounds: 12 });
+    expect(UserPasswordGetBcryptRounds()).toBe(12);
+
+    const user = new User();
+    await UserPasswordSetPassword(null as never, user, "testPassword1234");
+    expect(user.passwordEncrypted).toMatch(/^\$2[aby]\$12\$/);
+  });
+
+  it.each([
+    [4, 10],
+    [9, 10],
+    [10, 10],
+    [15, 15],
+    [20, 15],
+    [12.7, 12],
+    [Number.NaN, 10],
+    [Number.POSITIVE_INFINITY, 10],
+  ])("clamps the requested cost %s to %s", (requested, expected) => {
+    UserPasswordSetPolicy({ bcryptRounds: requested });
+    expect(UserPasswordGetBcryptRounds()).toBe(expected);
   });
 });

@@ -79,6 +79,20 @@ describe("LLMClient", () => {
       );
     });
 
+    it("should disable the client-level timeout when timeoutMs is 0", () => {
+      new LLMClient({
+        apiKey: "key",
+        apiUrl: "https://api.example.com/chat/completions",
+        model: "test-model",
+        timeoutMs: 0,
+        logger: mockLogger,
+      });
+
+      expect(mockedCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ timeout: 0 }),
+      );
+    });
+
     it.each([
       ["apiKey", { apiKey: "" }],
       ["apiUrl", { apiUrl: "" }],

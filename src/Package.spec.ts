@@ -58,7 +58,9 @@ describe("Packaging", () => {
       default: "./dist/index.js",
     });
     expect(pkg.exports["./package.json"]).toBe("./package.json");
-    const subpaths = [
+    // Explicit (not derived from package.json) so that dropping an export, or
+    // adding one without documenting it, fails the test.
+    const expectedSubpaths = [
       "./otel",
       "./config",
       "./db",
@@ -68,11 +70,15 @@ describe("Packaging", () => {
       "./users",
       "./notifications",
       "./llm",
+      "./http-retry",
       "./system",
       "./timeout",
     ];
-    for (const subpath of subpaths) {
-      expect(pkg.exports[subpath]).toBeDefined();
+    const actualSubpaths = Object.keys(pkg.exports)
+      .filter((key) => key !== "." && key !== "./package.json")
+      .sort();
+    expect(actualSubpaths).toEqual([...expectedSubpaths].sort());
+    for (const subpath of expectedSubpaths) {
       expect(
         (pkg.exports[subpath].types as string).startsWith("./dist/"),
       ).toBe(true);

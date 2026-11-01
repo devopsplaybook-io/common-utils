@@ -5,29 +5,35 @@ import { User } from "./User";
 /** bcrypt only uses the first 72 bytes of a password. */
 const BCRYPT_MAX_PASSWORD_BYTES = 72;
 
-/**
- * Bcrypt hash of a random value used to keep the login timing independent of
- * whether the username exists: an unknown user costs the same compare.
- */
-const DUMMY_PASSWORD_HASH =
-  "$2b$10$YTEjZB73URB5hX4i8ATVHu7ZWZusJSRSLSw3tZpsSSFGuPBK/eQCq";
+/** Default bcrypt cost factor (kept at the historical value). */
+export const BCRYPT_ROUNDS_DEFAULT = 10;
+/** Lowest accepted bcrypt cost factor. */
+export const BCRYPT_ROUNDS_MIN = 10;
+/** Highest accepted bcrypt cost factor. */
+export const BCRYPT_ROUNDS_MAX = 15;
 
 let minLength = 0;
 let customValidator: ((password: string) => string | null) | null = null;
+let bcryptRounds = BCRYPT_ROUNDS_DEFAULT;
 
 /**
  * Configure the password policy applied by {@link UserPasswordValidate} and
  * {@link UserPasswordSetPassword}.
  *
- * @param policy.minLength  Minimum number of characters (default 0: no
- *                          minimum). The 72-byte bcrypt limit is always
- *                          enforced.
- * @param policy.validator  Application-defined check returning an error
- *                          message or `null`. Pass `null` to remove it.
+ * @param policy.minLength     Minimum number of characters (default 0: no
+ *                             minimum). The 72-byte bcrypt limit is always
+ *                             enforced.
+ * @param policy.validator     Application-defined check returning an error
+ *                             message or `null`. Pass `null` to remove it.
+ * @param policy.bcryptRounds  Cost factor for new hashes (default 10, clamped
+ *                             to 10-15). Each increment doubles the CPU cost;
+ *                             stored hashes keep the cost they were created
+ *                             with.
  */
 export function UserPasswordSetPolicy(policy: {
   minLength?: number;
   validator?: ((password: string) => string | null) | null;
+  bcryptRounds?: number;
 }): void {
   if (policy.minLength !== undefined) {
     minLength = Number.isFinite(policy.minLength)
@@ -37,11 +43,24 @@ export function UserPasswordSetPolicy(policy: {
   if (policy.validator !== undefined) {
     customValidator = policy.validator;
   }
+  if (policy.bcryptRounds !== undefined) {
+    bcryptRounds = Number.isFinite(policy.bcryptRounds)
+      ? Math.min(
+          BCRYPT_ROUNDS_MAX,
+          Math.max(BCRYPT_ROUNDS_MIN, Math.floor(policy.bcryptRounds)),
+        )
+      : BCRYPT_ROUNDS_DEFAULT;
+  }
 }
 
 /** Configured minimum password length (0 = no minimum). */
 export function UserPasswordGetMinLength(): number {
   return minLength;
+}
+
+/** Configured bcrypt cost factor for new hashes (10-15). */
+export function UserPasswordGetBcryptRounds(): number {
+  return bcryptRounds;
 }
 
 /**
@@ -74,7 +93,7 @@ export async function UserPasswordSetPassword(
   if (error) {
     throw new Error(error);
   }
-  const salt = await bcrypt.genSalt(10);
+  const salt = await bcrypt.genSalt(bcryptRounds);
   user.passwordEncrypted = await bcrypt.hash(password, salt);
 }
 
@@ -87,15 +106,13 @@ export async function UserPasswordCheckPassword(
 }
 
 /**
- * Run a bcrypt comparison against a fixed dummy hash. Used on the
- * unknown-user login path so response timing does not disclose whether an
- * account exists.
+ * Run one bcrypt operation at the configured cost. Used on the unknown-user
+ * login path so response timing does not disclose whether an account exists:
+ * the result is discarded and the cost matches a real password check.
  */
 export async function UserPasswordCheckPasswordDummy(
   password: unknown,
 ): Promise<void> {
-  await bcrypt.compare(
-    typeof password === "string" ? password : "",
-    DUMMY_PASSWORD_HASH,
-  );
+  const salt = await bcrypt.genSalt(bcryptRounds);
+  await bcrypt.hash(typeof password === "string" ? password : "", salt);
 }

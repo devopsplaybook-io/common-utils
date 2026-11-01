@@ -63,10 +63,14 @@ export function HttpRetryNormalizeOptions(
 
 /**
  * Whether an error is worth retrying: a network/timeout failure (Axios error
- * without a response), HTTP 429 or a 5xx response.
+ * without a response), HTTP 429 or a 5xx response. A canceled request is
+ * never retried: the caller (or a timeout signal) aborted it on purpose.
  */
 export function HttpRetryIsRetryable(error: unknown): boolean {
   if (!axios.isAxiosError(error)) {
+    return false;
+  }
+  if (error.code === "ERR_CANCELED") {
     return false;
   }
   if (!error.response) {

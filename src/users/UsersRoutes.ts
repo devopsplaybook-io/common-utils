@@ -57,6 +57,14 @@ import {
 
 /** Maximum accepted API token name length. */
 const API_TOKEN_NAME_MAX_LENGTH = 255;
+/** Maximum accepted user name length. */
+const USER_NAME_MAX_LENGTH = 64;
+/**
+ * ASCII alphanumerics with inner `.`/`_`/`-`; the first and last characters
+ * must be alphanumeric. Keeps names safe to log, embed in audit events and
+ * use as a database key without escaping.
+ */
+const USER_NAME_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 /** Default page size of `GET /` and the largest accepted `limit`. */
 const USERS_LIST_DEFAULT_LIMIT = 100;
 const USERS_LIST_MAX_LIMIT = 1000;
@@ -73,6 +81,19 @@ function validateCredentialsBody(body: Record<string, unknown>): string | null {
   if (typeof body.name !== "string") {
     return "Invalid: Name";
   }
+  // Normalize at the request boundary so login, creation, uniqueness checks,
+  // audit events and rate-limit lookups all see the same name.
+  const name = body.name.trim();
+  if (name === "") {
+    return "Missing: Name";
+  }
+  if (name.length > USER_NAME_MAX_LENGTH) {
+    return `Name Too Long (maximum ${USER_NAME_MAX_LENGTH} characters)`;
+  }
+  if (!USER_NAME_PATTERN.test(name)) {
+    return "Invalid: Name";
+  }
+  body.name = name;
   if (isMissing(body.password)) {
     return "Missing: Password";
   }

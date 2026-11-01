@@ -32,7 +32,7 @@ export interface LLMClientConfig {
   apiUrl: string;
   /** Model name to use (e.g., "deepseek-chat") */
   model: string;
-  /** Request timeout in milliseconds (defaults to 120000) */
+  /** Request timeout in milliseconds (defaults to 120000; `0` disables it) */
   timeoutMs?: number;
   /**
    * Optional bounded retry for network errors, HTTP 429 and 5xx responses.
@@ -146,7 +146,9 @@ export class LLMClient {
   constructor(config: LLMClientConfig) {
     this.enabled = !!(config.apiKey && config.apiUrl && config.model);
     this.model = config.model;
-    this.timeoutMs = config.timeoutMs || 120000;
+    // `??` (not `||`): `timeoutMs: 0` is the documented way to disable the
+    // timeout and must not fall back to the default.
+    this.timeoutMs = config.timeoutMs ?? 120000;
     this.logger = config.logger || consoleLogger;
     this.retry = config.retry;
 

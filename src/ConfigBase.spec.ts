@@ -61,6 +61,7 @@ describe("ConfigBase", () => {
     delete process.env.JWT_ISSUER;
     delete process.env.JWT_AUDIENCE;
     delete process.env.PASSWORD_MIN_LENGTH;
+    delete process.env.BCRYPT_ROUNDS;
     delete process.env.API_TOKENS_REVOKE_ON_PASSWORD_CHANGE;
     delete process.env.DATABASE_SQLITE_JOURNAL_MODE;
     delete process.env.DATABASE_SQLITE_BUSY_TIMEOUT_MS;
@@ -127,6 +128,19 @@ describe("ConfigBase", () => {
     expect(config.DATABASE_SQLITE_JOURNAL_MODE).toBe("wal");
     expect(config.DATABASE_SQLITE_BUSY_TIMEOUT_MS).toBe(2500);
     expect(config.DATABASE_SQLITE_FOREIGN_KEYS).toBe(true);
+  });
+
+  it("should default BCRYPT_ROUNDS to 10 and load it from the environment", async () => {
+    const config = new TestConfig(configPath);
+    expect(config.BCRYPT_ROUNDS).toBe(10);
+
+    process.env.BCRYPT_ROUNDS = "12";
+    await config.reload();
+    expect(config.BCRYPT_ROUNDS).toBe(12);
+
+    delete process.env.BCRYPT_ROUNDS;
+    await config.reload();
+    expect(config.BCRYPT_ROUNDS).toBe(10);
   });
 
   it("should load the rate-limit settings from the environment", async () => {
