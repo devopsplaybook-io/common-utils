@@ -8,6 +8,7 @@ export * from "./src/Notifications";
 export * from "./src/LLM";
 export * from "./src/HttpError";
 export * from "./src/HttpRetry";
+export * from "./src/FastifyErrorHandler";
 export * from "./src/SystemCommand";
 export * from "./src/Timeout";
 export * from "./src/users/User";

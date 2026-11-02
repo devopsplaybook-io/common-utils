@@ -71,6 +71,7 @@ describe("Packaging", () => {
       "./notifications",
       "./llm",
       "./http-retry",
+      "./fastify-error-handler",
       "./system",
       "./timeout",
     ];
