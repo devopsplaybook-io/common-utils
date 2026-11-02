@@ -1,6 +1,6 @@
 {
   "name": "@devopsplaybook.io/common-utils",
-  "version": "2.8.0",
+  "version": "2.9.0",
   "description": "Shared utility modules for devopsplaybook.io projects (DB, Config, OTel context, auth/users, notifications, LLM, system helpers)",
   "keywords": [
     "Open Telemetry",
@@ -69,6 +69,10 @@
     "./http-retry": {
       "types": "./dist/src/HttpRetry.d.ts",
       "default": "./dist/src/HttpRetry.js"
+    },
+    "./fastify-error-handler": {
+      "types": "./dist/src/FastifyErrorHandler.d.ts",
+      "default": "./dist/src/FastifyErrorHandler.js"
     },
     "./system": {
       "types": "./dist/src/SystemCommand.d.ts",

@@ -58,6 +58,7 @@ npm install @devopsplaybook.io/common-utils
 | `@devopsplaybook.io/common-utils/notifications` | `NotificationsClient`                      |
 | `@devopsplaybook.io/common-utils/llm`         | `LLMClient`                                  |
 | `@devopsplaybook.io/common-utils/http-retry`  | `HttpRetry`                                  |
+| `@devopsplaybook.io/common-utils/fastify-error-handler` | `FastifyErrorHandlerRegister`       |
 | `@devopsplaybook.io/common-utils/system`      | `SystemCommandExecute`                       |
 | `@devopsplaybook.io/common-utils/timeout`     | `TimeoutWait`                                |
 
@@ -620,6 +621,32 @@ const response = await HttpRetry(
 | `HttpRetryOptions`           | `{ maxAttempts?, baseDelayMs?, maxDelayMs? }` (attempts capped at 10)    |
 | `HttpRetryNormalizeOptions`  | Validate and clamp options to their defaults                             |
 | `HttpRetryIsRetryable`       | `true` for network errors, HTTP 429 and 5xx (never for `ERR_CANCELED`)   |
+
+#### `FastifyErrorHandler` -- Safe Error Responses
+
+Fastify's default error handler serializes the thrown error, including its `code` and message. When an unexpected server failure carries driver details (for example better-sqlite3's `SQLITE_READONLY` / "attempt to write a readonly database"), every client receives the server's internal reason. Register the shared handler right after creating the Fastify instance and before registering routes:
+
+```ts
+import Fastify from "fastify";
+import { FastifyErrorHandlerRegister } from "@devopsplaybook.io/common-utils/fastify-error-handler";
+
+const fastify = Fastify({ logger: { level: "error" } });
+FastifyErrorHandlerRegister(fastify);
+
+// ... register plugins and routes
+```
+
+| Response | Body |
+| --- | --- |
+| 5xx | `{ statusCode, error: <status label>, message: <status label> }` — the thrown message and `code` are logged server-side at error level and never sent to the client |
+| 4xx | `{ statusCode, error, message, code? }` — message and code are kept so validation and plugin errors (rate limiting, payload limits, invalid bodies) stay actionable |
+
+A status already set on the reply is kept, matching Fastify's default handler; the original error is always logged for 5xx responses, so server-side observability keeps the details the client no longer sees.
+
+| Export                        | Description                                                        |
+| ----------------------------- | ------------------------------------------------------------------ |
+| `FastifyErrorHandlerRegister` | Install the safe error handler on a `FastifyInstance`              |
+| `FastifyErrorHandlerBody`     | Shape of the JSON body produced by the handler                     |
 
 ### Quick Start
 
