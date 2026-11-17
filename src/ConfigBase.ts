@@ -23,6 +23,16 @@ export interface ConfigFieldDef {
    * ```
    */
   envAliases?: string[];
+  /**
+   * When `true`, a non-empty value already on the instance (configured or
+   * assigned at runtime, for example a JWT signing key resolved from the
+   * database by `AuthInit`) is kept when `reload()` finds no environment or
+   * config-file value for the field. Without it a reload would restore the
+   * registered default and silently invalidate values the library manages
+   * itself. Provide a new non-empty environment/config value (or restart) to
+   * change such a field.
+   */
+  runtimeManaged?: boolean;
 }
 
 /**
@@ -201,10 +211,12 @@ export abstract class ConfigBase implements ConfigCommonInterface {
   public CONFIG_FILE: string;
   public API_PORT = 8080;
   /**
-   * Access-token lifetime in seconds. Defaults to 1 hour in 2.6.0 (it was
-   * 93 days before); renew with `POST /session/refresh`.
+   * Access-token lifetime in seconds. Defaults to 30 days so an idle browser
+   * session survives a month of inactivity; `JWT_SESSION_MAX_DURATION` caps
+   * the absolute session at the same 30 days from the first login. Renewing
+   * with `POST /session/refresh` never extends that absolute cap.
    */
-  public JWT_VALIDITY_DURATION = 3600;
+  public JWT_VALIDITY_DURATION = 30 * 24 * 3600;
   /**
    * Opt-in JWT revocation: when enabled, every JWT request re-reads the user
    * and rejects tokens whose `tokenVersion` claim is stale. Requires the
@@ -292,8 +304,17 @@ export abstract class ConfigBase implements ConfigCommonInterface {
     field: string;
     sensitive: boolean;
     envAliases: string[];
+    runtimeManaged: boolean;
     defaultValue: any;
   }[] = [];
+
+  /**
+   * Defaults are captured from the instance on the first {@link reload} so a
+   * subclass field initializer (or a subclass overriding a base field such as
+   * `JWT_VALIDITY_DURATION`) is honoured: the base constructor registers its
+   * fields before subclass initializers have run.
+   */
+  private _defaultsCaptured = false;
 
   /**
    * @param serviceId  Unique service identifier (e.g. `"cryptotrader-server"`).
@@ -325,7 +346,7 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       { field: "API_TOKENS_REVOKE_ON_PASSWORD_CHANGE" },
       { field: "CORS_POLICY_ORIGIN" },
       { field: "DATA_DIR" },
-      { field: "JWT_KEY", sensitive: true },
+      { field: "JWT_KEY", sensitive: true, runtimeManaged: true },
       { field: "LOG_LEVEL" },
       { field: "DATABASE_TYPE" },
       { field: "DATABASE_POSTGRES_HOST", envAliases: ["POSTGRES_HOST"] },
@@ -404,6 +425,8 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       existing.envAliases = [
         ...new Set([...existing.envAliases, ...(def.envAliases ?? [])]),
       ];
+      existing.runtimeManaged =
+        existing.runtimeManaged || (def.runtimeManaged ?? false);
       existing.defaultValue = cloneConfigValue((this as any)[def.field]);
       return;
     }
@@ -411,6 +434,7 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       field: def.field,
       sensitive: def.sensitive ?? false,
       envAliases: def.envAliases ?? [],
+      runtimeManaged: def.runtimeManaged ?? false,
       defaultValue: cloneConfigValue((this as any)[def.field]),
     });
   }
@@ -419,13 +443,26 @@ export abstract class ConfigBase implements ConfigCommonInterface {
    * Load (or reload) configuration from the JSON file and environment variables.
    * Environment variables always take precedence over file values. Fields that
    * are no longer present in either layer are restored to their registered
-   * defaults (arrays and objects are deep-cloned, never shared).
+   * defaults (arrays and objects are deep-cloned, never shared), except
+   * `runtimeManaged` fields whose current value is already non-empty.
+   *
+   * Defaults are captured from the instance on the first reload, after the
+   * subclass field initializers have run, so a subclass overriding a base
+   * field (for example `JWT_VALIDITY_DURATION`) keeps its declared default.
    *
    * @param logger  Optional log callback `(message: string) => void`.
    *                When omitted nothing is logged (useful in tests).
    */
   public async reload(logger?: (message: string) => void): Promise<void> {
     const log = logger ?? (() => {});
+
+    if (!this._defaultsCaptured) {
+      for (const entry of this._fields) {
+        entry.defaultValue = cloneConfigValue((this as any)[entry.field]);
+      }
+      this._defaultsCaptured = true;
+    }
+
     let content: Record<string, unknown> = {};
     try {
       content = await fse.readJson(this.CONFIG_FILE);
@@ -445,14 +482,30 @@ export abstract class ConfigBase implements ConfigCommonInterface {
     log(`Configuration Value: SERVICE_ID: ${this.SERVICE_ID}`);
     log(`Configuration Value: VERSION: ${this.VERSION}`);
 
-    for (const { field, sensitive, envAliases, defaultValue } of this._fields) {
+    for (const {
+      field,
+      sensitive,
+      envAliases,
+      runtimeManaged,
+      defaultValue,
+    } of this._fields) {
       let from = "defaults";
       let foundValue: string | undefined;
       let usedAlias = false;
 
-      // Start from the registered default so a value that disappeared from
-      // the environment or the config file is cleared instead of lingering.
-      (this as any)[field] = cloneConfigValue(defaultValue);
+      const currentValue = (this as any)[field];
+      const keepRuntimeValue =
+        runtimeManaged &&
+        currentValue !== undefined &&
+        currentValue !== null &&
+        currentValue !== "";
+      if (keepRuntimeValue) {
+        from = "runtime";
+      } else {
+        // Start from the registered default so a value that disappeared from
+        // the environment or the config file is cleared instead of lingering.
+        (this as any)[field] = cloneConfigValue(defaultValue);
+      }
 
       // 1. Primary environment variable name
       if (process.env[field] !== undefined) {
