@@ -89,7 +89,7 @@ describe("ConfigBase", () => {
 
   it("should default the JWT lifetime, claims and extra limits", () => {
     const config = new TestConfig(configPath);
-    expect(config.JWT_VALIDITY_DURATION).toBe(3600);
+    expect(config.JWT_VALIDITY_DURATION).toBe(2592000);
     expect(config.JWT_SESSION_MAX_DURATION).toBe(2592000);
     expect(config.JWT_ISSUER).toBe("devopsplaybook.io");
     expect(config.JWT_AUDIENCE).toBe("devopsplaybook.io");
@@ -445,5 +445,75 @@ describe("ConfigBase: reload restores defaults", () => {
     const settingLog = logs.find((line) => line.includes("MY_SETTING"));
     expect(settingLog).toContain("default_value");
     expect(settingLog).toContain("(from defaults)");
+  });
+});
+
+describe("ConfigBase: subclass defaults and runtime-managed fields", () => {
+  let tmpDir: string;
+  let configPath: string;
+
+  beforeEach(() => {
+    tmpDir = fse.mkdtempSync(path.join(os.tmpdir(), "config-test-"));
+    configPath = path.join(tmpDir, "config.json");
+  });
+
+  afterEach(() => {
+    fse.removeSync(tmpDir);
+    delete process.env.JWT_KEY;
+    delete process.env.JWT_VALIDITY_DURATION;
+  });
+
+  /** A subclass overriding a field that ConfigBase registers first. */
+  class OverriddenSessionConfig extends ConfigBase {
+    public JWT_VALIDITY_DURATION = 7 * 24 * 3600;
+
+    constructor(configFile?: string) {
+      super("test-service", configFile);
+    }
+  }
+
+  it("captures a subclass override of a base field as the reloaded default", async () => {
+    const config = new OverriddenSessionConfig(configPath);
+    await config.reload();
+    expect(config.JWT_VALIDITY_DURATION).toBe(7 * 24 * 3600);
+
+    // A second reload must keep the same default (no value lingers from the
+    // first load and the base constructor's 30-day value never wins).
+    await config.reload();
+    expect(config.JWT_VALIDITY_DURATION).toBe(7 * 24 * 3600);
+  });
+
+  it("still lets the environment override the subclass default", async () => {
+    process.env.JWT_VALIDITY_DURATION = "900";
+    const config = new OverriddenSessionConfig(configPath);
+    await config.reload();
+    expect(config.JWT_VALIDITY_DURATION).toBe(900);
+  });
+
+  it("keeps a runtime-resolved JWT_KEY when no layer provides one", async () => {
+    const config = new TestConfig(configPath);
+    await config.reload();
+    expect(config.JWT_KEY).toBe("");
+
+    // AuthInit stores the DB-managed key on the config object at runtime.
+    config.JWT_KEY = "db-managed-key";
+    await config.reload();
+    expect(config.JWT_KEY).toBe("db-managed-key");
+
+    // A configured key still takes precedence.
+    process.env.JWT_KEY = "env-key";
+    await config.reload();
+    expect(config.JWT_KEY).toBe("env-key");
+  });
+
+  it("masks a runtime-managed value in the logs", async () => {
+    const config = new TestConfig(configPath);
+    config.JWT_KEY = "db-managed-key";
+    const logs: string[] = [];
+    await config.reload((msg) => logs.push(msg));
+    const keyLog = logs.find((line) => line.includes("JWT_KEY"));
+    expect(keyLog).toContain("********************");
+    expect(keyLog).not.toContain("db-managed-key");
+    expect(keyLog).toContain("(from runtime)");
   });
 });
