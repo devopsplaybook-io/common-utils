@@ -1,6 +1,6 @@
 {
   "name": "@devopsplaybook.io/common-utils",
-  "version": "2.10.0",
+  "version": "2.10.1",
   "description": "Shared utility modules for devopsplaybook.io projects (DB, Config, OTel context, auth/users, notifications, LLM, system helpers)",
   "keywords": [
     "Open Telemetry",
@@ -95,14 +95,14 @@
     "test": "jest --coverage"
   },
   "dependencies": {
-    "@devopsplaybook.io/otel-utils": "^1.14.2",
-    "@devopsplaybook.io/otel-utils-fastify": "^1.11.2",
+    "@devopsplaybook.io/otel-utils": "^1.14.3",
+    "@devopsplaybook.io/otel-utils-fastify": "^1.11.3",
     "@fastify/rate-limit": "^11.2.2",
     "@opentelemetry/api": "^1.10.0",
     "@opentelemetry/sdk-trace": "^3.1.1",
     "axios": "^1.21.1",
     "bcrypt": "^6.0.0",
-    "better-sqlite3": "^13.1.1",
+    "better-sqlite3": "^13.2.0",
     "fastify": "^5.12.8",
     "fs-extra": "^11.4.1",
     "jsonwebtoken": "^9.0.3",
@@ -114,7 +114,7 @@
   "devDependencies": {
     "@swc/core": "^1.16.22",
     "@swc/jest": "^0.2.39",
-    "@testcontainers/postgresql": "^12.2.1",
+    "@testcontainers/postgresql": "^12.2.2",
     "@types/bcrypt": "^6.0.0",
     "@types/better-sqlite3": "^9.6.0",
     "@types/fs-extra": "^11.0.4",
@@ -123,8 +123,8 @@
     "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
     "jest": "^30.5.2",
-    "oxlint": "^1.93.0",
-    "testcontainers": "^12.2.1",
+    "oxlint": "^1.94.0",
+    "testcontainers": "^12.2.2",
     "typescript": "^7.0.2"
   },
   "publishConfig": {
