@@ -38,6 +38,7 @@ describe("Packaging", () => {
     const files = npmPackFiles();
     expect(files).toContain("package.json");
     expect(files).toContain("LICENSE");
+    expect(files).toContain("docs/auth-session-policy.md");
     expect(files.some((f) => f.startsWith("dist/"))).toBe(true);
     expect(files.some((f) => f.startsWith("src/"))).toBe(false);
     expect(files.some((f) => f.endsWith(".spec.ts"))).toBe(false);
@@ -50,7 +51,7 @@ describe("Packaging", () => {
     const pkg = JSON.parse(
       fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"),
     );
-    expect(pkg.files).toEqual(["dist"]);
+    expect(pkg.files).toEqual(["dist", "docs"]);
     expect(pkg.main).toBe("dist/index.js");
     expect(pkg.types).toBe("dist/index.d.ts");
     expect(pkg.exports["."]).toEqual({

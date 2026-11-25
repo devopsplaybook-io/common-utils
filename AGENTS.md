@@ -29,6 +29,8 @@ src/
     UsersData.ts            # Users table CRUD (SQLite/Postgres)
     UsersApiTokensData.ts   # users_api_tokens table CRUD (SQLite/Postgres)
     UsersRoutes.ts          # Standard fastify user management routes (incl. self-service API tokens)
+    AuthSessionPolicy.ts    # Documented session policy + effective-config validator
+    AuthSessionPolicy.spec.ts # Unit tests + docs/auth-session-policy.md consistency check
   FastifyErrorHandler.ts    # Safe Fastify error handler (5xx hide internal code/message)
   SystemCommand.ts          # Promise wrapper around child_process.exec
   Timeout.ts                # Promise wrapper around setTimeout
@@ -105,6 +107,8 @@ All three commands must pass before committing. The CI pipeline (`reusable-npm-m
 
 ## Known Gotchas
 
+- **Auth session policy**: the single source of truth is [`docs/auth-session-policy.md`](./docs/auth-session-policy.md); `src/users/AuthSessionPolicy.spec.ts` parses its application table and fails `npm test` when it drifts from `AUTH_SESSION_POLICY_APPS`. Edit both together, and keep the first token of the numeric cells a plain integer. Do not lower a per-app value or "fix" a documented deviation without updating the policy document.
+- **`addConfigField` re-registration**: a `JWT_VALIDITY_DURATION` (or any field) declared in a `Config` subclass is ignored unless re-registered with `addConfigField` after assignment when using common-utils `<= 2.9.2` (the base constructor captured the library default before subclass initializers ran). From 2.10.1 the defaults are captured on the first `reload()` and the override is honoured. Renewal thresholds must stay below the token lifetime, otherwise the renewal can never fire.
 - **better-sqlite3 is synchronous**: `SqlDbUtils` functions return values directly (not Promises). `PostgresDbUtils` functions return Promises. The `DbUtils` facade returns `number | Promise<number>` depending on the active backend.
 - **Disable-comment placement**: `eslint-disable-next-line` applies to the **immediately following line only** (oxlint honors these comments too). When disabling a rule inside a function call argument, place the comment directly before the offending expression, not before the function call.
 - **pg callback typing**: Always explicitly type pg callback parameters: `(error: Error | null, result: { rowCount: number | null })`. TypeScript cannot infer these from the overloaded `pool.query` signature.
