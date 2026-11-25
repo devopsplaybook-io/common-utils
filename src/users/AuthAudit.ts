@@ -19,7 +19,11 @@ export type AuthAuditAction =
   | "user_delete"
   | "password_change"
   | "api_token_create"
-  | "api_token_revoke";
+  | "api_token_revoke"
+  | "login_code_approved"
+  | "login_code_consumed"
+  | "login_code_failed"
+  | "login_code_cancelled";
 
 /** A single audit record. */
 export interface AuthAuditEvent {
@@ -40,6 +44,10 @@ export interface AuthAuditEvent {
   targetUserName?: string;
   /** API token row id. The token value and hash are never included. */
   tokenId?: string;
+  /** Login-code request row id (never the code, request token or a hash). */
+  requestId?: string;
+  /** Parsed label of the requesting device (login-code consent preview). */
+  deviceLabel?: string;
   /** Names of the fields changed by an update (never their values). */
   fields?: string[];
   /** Remote IP address of the request, when available. */

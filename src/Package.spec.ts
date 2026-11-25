@@ -69,6 +69,8 @@ describe("Packaging", () => {
       "./db/postgres",
       "./db/no-telemetry",
       "./users",
+      "./users/login-codes",
+      "./users/login-codes/testing",
       "./notifications",
       "./llm",
       "./http-retry",

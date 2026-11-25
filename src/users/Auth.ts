@@ -48,6 +48,18 @@ export interface AuthConfig {
   BCRYPT_ROUNDS?: number;
   /** Revoke every API token when a password changes (defaults to false). */
   API_TOKENS_REVOKE_ON_PASSWORD_CHANGE?: boolean;
+  /** Opt-in cross-device login with a code (defaults to false). */
+  LOGIN_CODE_ENABLED?: boolean;
+  LOGIN_CODE_TTL_SECONDS?: number;
+  LOGIN_CODE_ROTATION_SECONDS?: number;
+  LOGIN_CODE_GRACE_SECONDS?: number;
+  LOGIN_CODE_POLL_INTERVAL_MS?: number;
+  LOGIN_CODE_MAX_ATTEMPTS?: number;
+  LOGIN_CODE_MAX_PENDING?: number;
+  LOGIN_CODE_RATE_LIMIT_CREATE_MAX?: number;
+  LOGIN_CODE_RATE_LIMIT_POLL_MAX?: number;
+  LOGIN_CODE_RATE_LIMIT_APPROVE_MAX?: number;
+  LOGIN_CODE_APPROVE_REQUIRE_PASSWORD?: boolean;
 }
 
 /**
@@ -165,6 +177,25 @@ export function AuthGetRateLimitWindowSeconds(): number {
 /** Whether API tokens are revoked when a password changes. */
 export function AuthGetApiTokensRevokeOnPasswordChange(): boolean {
   return config?.API_TOKENS_REVOKE_ON_PASSWORD_CHANGE === true;
+}
+
+/**
+ * The resolved JWT signing key (`AuthInit` persists a DB-managed one, or a
+ * configured `JWT_KEY` is used as-is). Returns `""` before `AuthInit`.
+ * Login codes derive their HMAC key from it so the codes are unreadable
+ * without the deployment secret.
+ */
+export function AuthGetJwtKey(): string {
+  return config?.JWT_KEY ?? "";
+}
+
+/**
+ * The configuration object passed to {@link AuthInit} (or `undefined` before
+ * it ran). Additive accessor used to resolve opt-in module settings such as
+ * the login-code feature without importing the host configuration class.
+ */
+export function AuthGetConfig(): AuthConfig | undefined {
+  return config;
 }
 
 /**

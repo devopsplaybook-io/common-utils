@@ -11,6 +11,7 @@ import {
   AuthGenerateJWT,
   AuthGetApiTokensMaxPerUser,
   AuthGetApiTokensRevokeOnPasswordChange,
+  AuthGetConfig,
   AuthGetLiveUser,
   AuthGetRateLimitLoginIpMax,
   AuthGetRateLimitLoginMax,
@@ -54,6 +55,12 @@ import {
   UsersDataUpdateUser,
   isUniqueViolationError,
 } from "./UsersData";
+import { LoginCodesOptionsFromConfig } from "./LoginCodes";
+import {
+  LoginCodesRoutes,
+  LoginCodesRoutesOptions,
+} from "./LoginCodesRoutes";
+import { createLoginCodesStoreCommonUtils } from "./LoginCodesStoreCommonUtils";
 
 /** Maximum accepted API token name length. */
 const API_TOKEN_NAME_MAX_LENGTH = 255;
@@ -196,6 +203,13 @@ function rateLimitErrorResponse(
  */
 export interface UsersRoutesOptions {
   rateLimitStore?: FastifyRateLimitStoreCtor;
+  /**
+   * Cross-device "login with a code". When supplied - or when
+   * `LOGIN_CODE_ENABLED` resolves to `true` - the login-code routes are
+   * mounted under `loginCodes.prefix` (default `/login-codes`). Without it and
+   * with the feature disabled they are not mounted at all.
+   */
+  loginCodes?: LoginCodesRoutesOptions;
 }
 
 /**
@@ -1002,5 +1016,29 @@ export class UsersRoutes {
       });
       return res.status(200).send({});
     });
+
+    // ==================== LOGIN WITH A CODE ====================
+
+    // Opt-in: mounted when enabled through the config or when the caller
+    // supplies login-code options. The default store is the common-utils one;
+    // an explicitly configured `enabled:false` still mounts the route set but
+    // answers 503 on every mutating endpoint (capabilities reports `false`).
+    const loginCodeSettings = LoginCodesOptionsFromConfig(AuthGetConfig());
+    if (options.loginCodes || loginCodeSettings.enabled) {
+      const loginCodesOptions: LoginCodesRoutesOptions = {
+        ...loginCodeSettings,
+        ...options.loginCodes,
+        store:
+          options.loginCodes?.store ?? createLoginCodesStoreCommonUtils(),
+        // When this plugin registered @fastify/rate-limit itself the store is
+        // already applied to the shared decorator; passing it again would be
+        // rejected. Only an explicit login-code store is forwarded.
+        rateLimitStore: options.loginCodes?.rateLimitStore,
+      };
+      await fastify.register(LoginCodesRoutes, {
+        ...loginCodesOptions,
+        prefix: options.loginCodes?.prefix ?? "/login-codes",
+      });
+    }
   }
 }

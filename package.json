@@ -1,6 +1,6 @@
 {
   "name": "@devopsplaybook.io/common-utils",
-  "version": "2.11.0",
+  "version": "2.12.0",
   "description": "Shared utility modules for devopsplaybook.io projects (DB, Config, OTel context, auth/users, notifications, LLM, system helpers)",
   "keywords": [
     "Open Telemetry",
@@ -57,6 +57,14 @@
     "./users": {
       "types": "./dist/src/users/index.d.ts",
       "default": "./dist/src/users/index.js"
+    },
+    "./users/login-codes": {
+      "types": "./dist/src/users/login-codes.d.ts",
+      "default": "./dist/src/users/login-codes.js"
+    },
+    "./users/login-codes/testing": {
+      "types": "./dist/src/users/LoginCodesTesting.d.ts",
+      "default": "./dist/src/users/LoginCodesTesting.js"
     },
     "./notifications": {
       "types": "./dist/src/Notifications.d.ts",

@@ -55,6 +55,8 @@ npm install @devopsplaybook.io/common-utils
 | `@devopsplaybook.io/common-utils/db/postgres` | `PostgresDbUtils` + `PostgresSchemaDbUtils`  |
 | `@devopsplaybook.io/common-utils/db/no-telemetry` | `DbUtilsNoTelemetry`                     |
 | `@devopsplaybook.io/common-utils/users`       | auth/users/routes module                     |
+| `@devopsplaybook.io/common-utils/users/login-codes` | login-with-code backend (core, routes, reference store) |
+| `@devopsplaybook.io/common-utils/users/login-codes/testing` | `LoginCodesStore` conformance suite |
 | `@devopsplaybook.io/common-utils/notifications` | `NotificationsClient`                      |
 | `@devopsplaybook.io/common-utils/llm`         | `LLMClient`                                  |
 | `@devopsplaybook.io/common-utils/http-retry`  | `HttpRetry`                                  |
@@ -136,6 +138,17 @@ await config.reload();
 | `AUTH_RATE_LIMIT_REFRESH_MAX`                     | `60` (`<= 0` disables)               | No                                  |
 | `AUTH_RATE_LIMIT_STATUS_MAX`                      | `60` (`<= 0` disables)               | No                                  |
 | `AUTH_RATE_LIMIT_WINDOW_SECONDS`                  | `60`                                 | No                                  |
+| `LOGIN_CODE_ENABLED`                              | `false` (opt-in)                     | No                                  |
+| `LOGIN_CODE_TTL_SECONDS`                          | `300` (clamped to 30-3600)           | No                                  |
+| `LOGIN_CODE_ROTATION_SECONDS`                     | `30` (clamped to 5-300)              | No                                  |
+| `LOGIN_CODE_GRACE_SECONDS`                        | `60` (clamped to 0-600)              | No                                  |
+| `LOGIN_CODE_POLL_INTERVAL_MS`                     | `2000` (clamped to 250-60000)        | No                                  |
+| `LOGIN_CODE_MAX_ATTEMPTS`                         | `5` (clamped to 1-100)               | No                                  |
+| `LOGIN_CODE_MAX_PENDING`                          | `100` (clamped to 1-1000000)         | No                                  |
+| `LOGIN_CODE_RATE_LIMIT_CREATE_MAX`                | `10` (`<= 0` disables)               | No                                  |
+| `LOGIN_CODE_RATE_LIMIT_POLL_MAX`                  | `120` (`<= 0` disables)              | No                                  |
+| `LOGIN_CODE_RATE_LIMIT_APPROVE_MAX`               | `10` (`<= 0` disables)               | No                                  |
+| `LOGIN_CODE_APPROVE_REQUIRE_PASSWORD`             | `false`                              | No                                  |
 | `PASSWORD_MIN_LENGTH`                             | `0` (non-empty only)                 | No                                  |
 | `BCRYPT_ROUNDS`                                   | `10` (clamped to 10-15)              | No                                  |
 | `API_TOKENS_REVOKE_ON_PASSWORD_CHANGE`            | `false`                              | No                                  |
@@ -506,7 +519,8 @@ fastify.register(new UsersRoutes().getRoutes, {
 | `UsersApiTokensDataSetOTel`  | Injects the OTel tracer (and optional `StandardLogger`) used by the API tokens data module |
 | `UsersApiTokensData*`        | API tokens table CRUD (`Get`, `GetByTokenHash`, `ListByUser`, `CountByUser`, `Add`, `Delete`, `DeleteByUser`, `SetLastUsed`) |
 | `UsersRoutes`                | Fastify routes: `GET /status/initialization`, `POST /session` (login), `POST /session/refresh` (renew an authenticated session), user CRUD, `PUT /password`, API tokens (`POST/GET /tokens`, `DELETE /tokens/:id`); login/refresh/status are rate limited. `getRoutes(fastify, { rateLimitStore? })` accepts an optional shared rate-limit store |
-| `UsersRoutesOptions`         | `{ rateLimitStore?: FastifyRateLimitStoreCtor }` — inject a shared `@fastify/rate-limit` store |
+| `UsersRoutesOptions`         | `{ rateLimitStore?: FastifyRateLimitStoreCtor, loginCodes?: LoginCodesRoutesOptions }` — inject a shared rate-limit store and/or enable the login-with-code routes |
+| `LoginCodesRoutes`           | Fastify plugin for the opt-in login-with-code protocol (see the next section); `createLoginCodesStoreCommonUtils()` returns the reference `LoginCodesStore` over the `DbUtils` facade |
 
 **Live authorization**: the guards (`AuthMustBeAuthenticated`, `AuthMustBeAdmin`, `AuthHasScope`) and `AuthGetLiveUser` resolve the user from the database on every request. The credential resolution itself runs once per request and caches **negative results too** (`req._jwtResolved` / `req._jwtPayload = null`), so a revoked or invalid credential rejected by the first helper call cannot authorize a later guard or route handler in the same request, and an unauthenticated request performs no repeated lookups. A guard and the route handler still share at most one live-user read. The JWT `role`/`scopes` claims are therefore **not** authoritative: a demoted admin loses admin rights on the next request, a revoked scope is denied immediately and a deleted user is rejected. `AuthGetUserSession` still returns the claims and must only be used for display/non-authorization purposes. With `JWT_REVOCATION_ENABLED` the tokenVersion check reuses the same live-user read.
 
@@ -562,6 +576,7 @@ The limiter is registered lazily by `UsersRoutes` (`@fastify/rate-limit`, `hook:
 | ------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | `users`             | `id`, `name`, `passwordEncrypted`, `role`, `scopes`                                          | Add a **case-insensitive unique index** on the name (`CREATE UNIQUE INDEX ... ON users (LOWER("name"))`): duplicate names differing only by case (e.g. `"Admin"` / `"admin"`) are then rejected with 400. With `JWT_REVOCATION_ENABLED` also add `"tokenVersion" INTEGER DEFAULT 0`. |
 | `users_api_tokens`  | `id`, `name`, `userId`, `tokenHash`, `dateCreated`                                           | Unique index on `tokenHash` and an index on `userId`. Optional additive migration for token expiry / last use: `"expiresAt" TEXT`, `"lastUsedAt" TEXT`. |
+| `users_login_codes` | `id`, `requestTokenHash`, `codeHash`, `previousCodeHash`, `codeExpiresAt`, `previousCodeExpiresAt`, `status`, `createdAt`, `updatedAt`, `expiresAt`, `approvedAt`, `approvedByUserId`, `consumedAt`, `attempts`, `requestUserAgent` | Only when the login-with-code feature is used. `requestTokenHash` is `UNIQUE`; a unique index on `codeHash` and an index on `(status, expiresAt)` are created by the same migration. No foreign key on `approvedByUserId` (deleting a user must neither cascade nor block; redemption fails closed). |
 | `metadata`          | created by `init-0000.sql`                                                                   | Stores the JWT key and the applied migration versions.                                                                             |
 
 SQL is written SQLite-first; the `DbUtils` facade converts placeholders for Postgres.
@@ -575,6 +590,92 @@ SQL is written SQLite-first; the `DbUtils` facade converts placeholders for Post
 **JWT revocation (opt-in)**: `role` and `scopes` are baked into a JWT at signing time, so a token stays valid (default 30 days, at most the absolute session lifetime) after the user is deleted or their role changes. With `JWT_REVOCATION_ENABLED=true` (default `false`; safe to enable since 2.6.0, planned as the default in a future major) every JWT request re-reads the user and rejects tokens whose `tokenVersion` claim is stale; password changes, role/scope changes and deletion therefore invalidate previously issued JWTs. A rejected token is cached as unauthenticated for the rest of the request, so it cannot authorize any later guard. This requires the `users.tokenVersion` column. JWTs are always verified as HS256 (`algorithms: ["HS256"]` is pinned); the `iss`/`aud` claims are set to `JWT_ISSUER`/`JWT_AUDIENCE` (default `devopsplaybook.io`) and validated when present, and every token gets a random `jti` (reserved for a future denylist). Tokens issued before 2.6.0 without `iss`/`aud` remain accepted until they expire.
 
 **Response conventions**: creation answers 201, reads and deletes answer 200. Malformed or bodyless writes answer 400 (`Missing: …` / `Invalid: …`) instead of HTTP 500: every body field is checked for presence **and type** at the route boundary. User names (`POST /` and `POST /session`) are trimmed at the boundary and must then be 1-64 characters of ASCII letters/digits with inner `.`, `_` or `-` (the first and last characters must be alphanumeric): an empty or whitespace-only name answers 400 `Missing: Name`, a longer one 400 `Name Too Long`, and characters outside that set 400 `Invalid: Name`. The trimmed name is used for lookup, uniqueness, audit events and rate-limit keys. Existing rows that are padded, longer than 64 characters or use other characters must be renamed before deploying, since login now rejects them and there is no rename route. `GET /` is ordered by name and paginated with `?limit=&offset=`: the default page size is 100, the maximum is 1000, `offset` requires `limit`, and invalid values answer 400. The bootstrap insert, the last-admin guard and the API-token cap are enforced atomically in SQL (the first-admin insert only runs while the table is empty, the demotion/delete only while another admin remains, and the token insert only below the cap), serialised across Postgres replicas with advisory locks; deleting a user removes its API tokens in the same transaction. Credentials must use the `Bearer` scheme (case-insensitive): another scheme carrying a valid JWT is rejected. Unknown usernames run a dummy bcrypt compare so login timing does not reveal whether an account exists. Unauthenticated requests answer 401 `UNAUTHENTICATED`, forbidden ones 403 `FORBIDDEN`; the guards **send the response and then throw** — callers must wrap the guard in `try/catch` and `return` from the catch block (see the `UsersRoutes` implementations) so the route does not continue after the response.
+
+#### `LoginCodesRoutes` -- Login with a Code
+
+Opt-in cross-device "login with a code" standard (RFC 8628-style): a device without credentials creates a short-lived request, an already authenticated device previews the request and approves it, and the first device redeems it for a session. **Disabled by default; enabling it is additive and no existing export or route changes.** Codes and request tokens are never stored or audited in plaintext: codes are HMAC-SHA256 hashed with the deployment key and request tokens are SHA-256 hashed.
+
+Mount it through `UsersRoutes` (the default store is created for you when `LOGIN_CODE_ENABLED=true`):
+
+```ts
+await fastify.register(new UsersRoutes().getRoutes, {
+  prefix: "/api/users",
+  loginCodes: { store: createLoginCodesStoreCommonUtils() }, // optional
+});
+```
+
+or register the plugin directly on a custom auth stack:
+
+```ts
+import {
+  LoginCodesRoutes,
+  createLoginCodesStoreCommonUtils,
+} from "@devopsplaybook.io/common-utils/users/login-codes";
+
+await fastify.register(LoginCodesRoutes, {
+  prefix: "/api/login-codes",
+  store: createLoginCodesStoreCommonUtils(),
+  hashKey: () => mySigningKey,           // default: AuthGetJwtKey()
+  getApprovingUser: mySessionResolver,   // default: live JWT user, API tokens rejected
+  getUserById: myUserLookup,             // live approver re-read at redemption (fail closed)
+  issueSession: mySessionIssuer,         // default: AuthGenerateJWT
+  verifyPassword: myPasswordCheck,       // only used with approveRequiresPassword
+  onEvent: myAuditSink,                  // default: AuthAuditEmit
+  rateLimitStore: mySharedStore,         // optional, multi-replica limits
+});
+```
+
+| Method | Path (under the prefix) | Auth | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/capabilities` | none | `{ enabled, available, codeLength, rotationSeconds, graceSeconds, ttlSeconds, pollIntervalMs, approveRequiresPassword, serverTime }`; never 5xx (a probe/key error answers `available:false`) |
+| `POST` | `/` (trailing slash) | none, per-IP limit | `201 { requestToken, code, codeExpiresAt, expiresAt, serverTime }`; `503` when disabled/table missing/key empty, `429` at the pending cap |
+| `POST` | `/poll` | request token in body, per-token limit | `pending` (with a new `code` only after a rotation), `approved` (`token` + `user`), or `expired`/`cancelled`/`failed` |
+| `POST` | `/preview` | interactive session | Device label, raw user agent, request timestamps; consumes one attempt |
+| `POST` | `/approve` | interactive session | `{ approved: true }`; API tokens are rejected with 403 `Session Token Required` |
+| `POST` | `/cancel` | request token in body | Idempotent cancellation while pending; approved/consumed requests answer 409 `ALREADY_USED` |
+
+Requests live `LOGIN_CODE_TTL_SECONDS` (default 300 s). While pending, `/poll` lazily rotates the code every `LOGIN_CODE_ROTATION_SECONDS` (default 30, minimum 5) and returns the new plaintext code in that response; the previous hash stays valid for `LOGIN_CODE_GRACE_SECONDS` (default 60) so in-flight typing is not punished. `refreshCode: true` forces a rotation (after the 5 s minimum) to recover a lost code. Redemption is a single atomic `approved → consumed` update, the approver is re-read live, and every mutation is a compare-and-set SQL statement, so the state machine is safe across replicas. Expiry and failure transitions happen lazily on `/poll`; there is no scheduler and no in-memory state. Every response sends `Cache-Control: no-store`, `Pragma: no-cache` and `Vary: Authorization`.
+
+Exceeding an attempt/creation limit answers `429 { error: "Too Many Requests", code: "RATE_LIMITED" }` with a `Retry-After` header; the rate limiters are per IP for create/preview/approve/cancel and per request-token hash for poll (`0` disables one). As with `UsersRoutes`, limits are per process unless a shared `@fastify/rate-limit` store is injected; when the host already registered `@fastify/rate-limit`, pass the store to the host registration instead (supplying one to the plugin throws at startup).
+
+The module ships four extra audit actions -- `login_code_approved`, `login_code_consumed`, `login_code_failed` and `login_code_cancelled` -- carrying the request id, actor, parsed device label and reason; codes, tokens and hashes are never included.
+
+**Migration** -- add the DDL below as the next `init-NNNN.sql` (identical for SQLite and Postgres; the `DbUtils` facade converts placeholders) before enabling the feature:
+
+```sql
+CREATE TABLE IF NOT EXISTS "users_login_codes" (
+  "id" TEXT PRIMARY KEY,
+  "requestTokenHash" TEXT NOT NULL UNIQUE,
+  "codeHash" TEXT NOT NULL,
+  "previousCodeHash" TEXT,
+  "codeExpiresAt" TEXT NOT NULL,
+  "previousCodeExpiresAt" TEXT,
+  "status" TEXT NOT NULL,
+  "createdAt" TEXT NOT NULL,
+  "updatedAt" TEXT NOT NULL,
+  "expiresAt" TEXT NOT NULL,
+  "approvedAt" TEXT,
+  "approvedByUserId" TEXT,
+  "consumedAt" TEXT,
+  "attempts" INTEGER NOT NULL DEFAULT 0,
+  "requestUserAgent" TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "users_login_codes_code_hash" ON "users_login_codes" ("codeHash");
+CREATE INDEX IF NOT EXISTS "users_login_codes_status_expires" ON "users_login_codes" ("status", "expiresAt");
+```
+
+Custom-auth applications that implement the `LoginCodesStore` seam should run the conformance suite in their CI (each test builds its own store, so the backing table must be empty):
+
+```ts
+import { registerLoginCodesStoreConformance } from "@devopsplaybook.io/common-utils/users/login-codes/testing";
+
+registerLoginCodesStoreConformance(
+  { describe, it },
+  { createStore: () => myLoginCodesStore },
+);
+```
+
+Importing `@devopsplaybook.io/common-utils/users/login-codes` does not load `better-sqlite3`, `pg`, `ConfigBase` or the shared users routes. Protocol details, the threat model and the full integration guide are in [`docs/login-with-code.md`](./docs/login-with-code.md).
 
 ---
 

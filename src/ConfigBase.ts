@@ -84,6 +84,18 @@ export interface ConfigCommonInterface
   AUTH_RATE_LIMIT_STATUS_MAX: number;
   /** Rate-limit window in seconds. */
   AUTH_RATE_LIMIT_WINDOW_SECONDS: number;
+  /** Opt-in cross-device login with a code (disabled by default). */
+  LOGIN_CODE_ENABLED?: boolean;
+  LOGIN_CODE_TTL_SECONDS?: number;
+  LOGIN_CODE_ROTATION_SECONDS?: number;
+  LOGIN_CODE_GRACE_SECONDS?: number;
+  LOGIN_CODE_POLL_INTERVAL_MS?: number;
+  LOGIN_CODE_MAX_ATTEMPTS?: number;
+  LOGIN_CODE_MAX_PENDING?: number;
+  LOGIN_CODE_RATE_LIMIT_CREATE_MAX?: number;
+  LOGIN_CODE_RATE_LIMIT_POLL_MAX?: number;
+  LOGIN_CODE_RATE_LIMIT_APPROVE_MAX?: number;
+  LOGIN_CODE_APPROVE_REQUIRE_PASSWORD?: boolean;
   /** Minimum password length (`0` = only non-empty passwords). */
   PASSWORD_MIN_LENGTH: number;
   /**
@@ -244,6 +256,28 @@ export abstract class ConfigBase implements ConfigCommonInterface {
   public AUTH_RATE_LIMIT_STATUS_MAX = 60;
   /** Rate-limit window in seconds. */
   public AUTH_RATE_LIMIT_WINDOW_SECONDS = 60;
+  /** Opt-in cross-device login with a code (disabled by default). */
+  public LOGIN_CODE_ENABLED = false;
+  /** Login-code request lifetime in seconds. */
+  public LOGIN_CODE_TTL_SECONDS = 300;
+  /** Login-code rotation interval in seconds (minimum 5). */
+  public LOGIN_CODE_ROTATION_SECONDS = 30;
+  /** Grace period of a rotated-out login code in seconds. */
+  public LOGIN_CODE_GRACE_SECONDS = 60;
+  /** Client poll interval hint for login codes, in milliseconds. */
+  public LOGIN_CODE_POLL_INTERVAL_MS = 2000;
+  /** Attempts allowed per login-code request. */
+  public LOGIN_CODE_MAX_ATTEMPTS = 5;
+  /** Global cap of pending login-code requests. */
+  public LOGIN_CODE_MAX_PENDING = 100;
+  /** Login-code create requests allowed per IP per window. */
+  public LOGIN_CODE_RATE_LIMIT_CREATE_MAX = 10;
+  /** Login-code polls allowed per request token per window. */
+  public LOGIN_CODE_RATE_LIMIT_POLL_MAX = 120;
+  /** Preview/approve/cancel requests allowed per IP per window. */
+  public LOGIN_CODE_RATE_LIMIT_APPROVE_MAX = 10;
+  /** Require the account password when approving a login code. */
+  public LOGIN_CODE_APPROVE_REQUIRE_PASSWORD = false;
   /** Minimum password length enforced by the auth module. */
   public PASSWORD_MIN_LENGTH = 0;
   /**
@@ -341,6 +375,17 @@ export abstract class ConfigBase implements ConfigCommonInterface {
       { field: "AUTH_RATE_LIMIT_REFRESH_MAX" },
       { field: "AUTH_RATE_LIMIT_STATUS_MAX" },
       { field: "AUTH_RATE_LIMIT_WINDOW_SECONDS" },
+      { field: "LOGIN_CODE_ENABLED" },
+      { field: "LOGIN_CODE_TTL_SECONDS" },
+      { field: "LOGIN_CODE_ROTATION_SECONDS" },
+      { field: "LOGIN_CODE_GRACE_SECONDS" },
+      { field: "LOGIN_CODE_POLL_INTERVAL_MS" },
+      { field: "LOGIN_CODE_MAX_ATTEMPTS" },
+      { field: "LOGIN_CODE_MAX_PENDING" },
+      { field: "LOGIN_CODE_RATE_LIMIT_CREATE_MAX" },
+      { field: "LOGIN_CODE_RATE_LIMIT_POLL_MAX" },
+      { field: "LOGIN_CODE_RATE_LIMIT_APPROVE_MAX" },
+      { field: "LOGIN_CODE_APPROVE_REQUIRE_PASSWORD" },
       { field: "PASSWORD_MIN_LENGTH" },
       { field: "BCRYPT_ROUNDS" },
       { field: "API_TOKENS_REVOKE_ON_PASSWORD_CHANGE" },
