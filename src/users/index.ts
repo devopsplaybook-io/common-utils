@@ -7,3 +7,4 @@ export * from "./UserPassword";
 export * from "./UsersData";
 export * from "./UsersApiTokensData";
 export * from "./UsersRoutes";
+export * from "./AuthSessionPolicy";

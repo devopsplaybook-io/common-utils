@@ -20,3 +20,4 @@ export * from "./src/users/UserPassword";
 export * from "./src/users/UsersData";
 export * from "./src/users/UsersApiTokensData";
 export * from "./src/users/UsersRoutes";
+export * from "./src/users/AuthSessionPolicy";

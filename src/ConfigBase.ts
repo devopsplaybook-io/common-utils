@@ -415,6 +415,14 @@ export abstract class ConfigBase implements ConfigCommonInterface {
   /**
    * Register a configuration field so that {@link reload} processes it.
    * Call this in your subclass constructor for every project-specific field.
+   *
+   * Re-registering a field also updates its captured default. This is how a
+   * subclass override survives a reload on common-utils `<= 2.9.2`: without a
+   * re-registration, `reload()` restored the library default registered by the
+   * base constructor before the subclass field initializer ran. From 2.10.1 the
+   * defaults are captured on the first `reload()`, after subclass initializers,
+   * so the override is honoured even without a re-registration — keeping the
+   * call remains harmless and is the safest habit across versions.
    */
   public addConfigField(def: ConfigFieldDef): void {
     const existing = this._fields.find((entry) => entry.field === def.field);
