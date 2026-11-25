@@ -25,6 +25,11 @@ import {
   UsersDataAddIfEmpty,
   UsersDataSetOTel,
 } from "./users/UsersData";
+import { assertLoginCodesStoreConformance } from "./users/LoginCodesTesting";
+import {
+  LOGIN_CODES_DDL_POSTGRES,
+  createLoginCodesStoreCommonUtils,
+} from "./users/LoginCodesStoreCommonUtils";
 
 /**
  * Integration tests against a real PostgreSQL server
@@ -313,6 +318,50 @@ describeWithDocker("PostgresDbUtils integration (real PostgreSQL)", () => {
       "SELECT COUNT(*)::int AS count FROM users",
     );
     expect(rows[0].count).toBe(1);
+  });
+
+  it("passes the login-code store conformance suite on PostgreSQL", async () => {
+    writeMigration(
+      "init-0000.sql",
+      `${MIGRATION_0000}\n${LOGIN_CODES_DDL_POSTGRES}`,
+    );
+    await DbUtilsInit(
+      undefined as never,
+      { ...makeConfig(), DATABASE_TYPE: "postgres" } as never,
+      sqlDir,
+    );
+
+    // Conditional inserts serialise through the advisory lock even when eight
+    // replicas race: exactly the pending cap succeeds.
+    const store = createLoginCodesStoreCommonUtils();
+    const createdAt = "2023-11-14T22:13:20.000Z";
+    const codeExpiresAt = "2023-11-14T22:13:50.000Z";
+    const expiresAt = "2023-11-14T22:18:20.000Z";
+    const results = await Promise.all(
+      Array.from({ length: 8 }, (_, index) =>
+        store.create({
+          id: `concurrent-${index}`,
+          requestTokenHash: `token-hash-${index}`,
+          codeHash: `code-hash-${index}`,
+          codeExpiresAt,
+          createdAt,
+          updatedAt: createdAt,
+          expiresAt,
+          requestUserAgent: null,
+          maxPending: 3,
+        }),
+      ),
+    );
+    expect(results.filter((result) => result.ok)).toHaveLength(3);
+    expect(
+      results.filter(
+        (result) => !result.ok && result.reason === "pending_cap",
+      ),
+    ).toHaveLength(5);
+
+    await assertLoginCodesStoreConformance({
+      createStore: () => createLoginCodesStoreCommonUtils(),
+    });
   });
 
   it("initialises a schema, applies migrations and serves both pools", async () => {
