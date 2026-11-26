@@ -811,7 +811,7 @@ span.end();
 
 The `.github/workflows/` directory contains **reusable workflows** that other repositories can call to standardize their CI/CD pipelines.
 
-This repository's own `pr-check.yml` runs a `workflow-lint` job (`actionlint` v1.7.7) on every pull request, so a broken reusable workflow fails on its PR before it reaches `main` and breaks consumers. The reusable calls stay pinned at `@main` on purpose: pointing them at `./.github/workflows/...` would let a pull request execute a modified copy of the workflow that gates it. Lint locally with `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7`.
+This repository's own `pr-check.yml` runs a `workflow-lint` job (`actionlint` v1.7.12) on every pull request, so a broken reusable workflow fails on its PR before it reaches `main` and breaks consumers. The reusable calls stay pinned at `@main` on purpose: pointing them at `./.github/workflows/...` would let a pull request execute a modified copy of the workflow that gates it. Lint locally with `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12`.
 
 ### Reusable Workflows
 
