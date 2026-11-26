@@ -238,9 +238,14 @@ jobs:
           MAJOR=$(echo "${RELEASE_VERSION}" | cut -f1 -d".")
           MINOR=$(echo "${RELEASE_VERSION}" | cut -f1-2 -d".")
 
+          # Read-only shared registry cache written by the PR verify workflow,
+          # so the rare fallback build is not a cold build.
+          CACHE_REF="${RELEASE_IMAGE}:buildcache"
+
           echo "Building ${RELEASE_IMAGE}:${RELEASE_VERSION} from ${GITHUB_SHA}"
           docker buildx build \
             --platform "${DOCKER_PLATFORMS}" \
+            --cache-from "type=registry,ref=${CACHE_REF}" \
             --push \
             -f Dockerfile \
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \

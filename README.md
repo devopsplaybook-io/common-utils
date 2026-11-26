@@ -820,7 +820,7 @@ This repository's own `pr-check.yml` runs a `workflow-lint` job (`actionlint` v1
 | **NPM Merge**   | `reusable-npm-merge.yml`   | `workflow_call` | Lint, test, build, and publish a release to npm on merge to main. Uploads coverage to Quality Dashboard. Only publishes if the version doesn't already exist. |
 | **NPM PR**      | `reusable-npm-pr.yml`      | `workflow_call` | Lint, test, and build on PR. Publishes a **beta** version tagged `beta` and comments the PR with install instructions.                                        |
 | **NPM Upgrade** | `reusable-npm-upgrade.yml` | `workflow_call` | Runs `npm-check-updates -u`, bumps the patch version of every package whose manifests changed (root and each changed `npm_services` sub-folder), and opens a PR. Skips only when another dependency-update PR is already open. |
-| **PR Verify**   | `reusable-pr-verify.yml`   | `workflow_call` | Matrix build/lint/test for multiple Node.js apps, plus a multi-platform Docker build pushed as `beta-pr-<PR number>` and `beta`, labelled with the PR head commit. For monorepos with Docker images. |
+| **PR Verify**   | `reusable-pr-verify.yml`   | `workflow_call` | Matrix build/lint/test for multiple Node.js apps, plus a multi-platform Docker build pushed as `beta-pr-<PR number>` and `beta`, labelled with the PR head commit, with a shared registry layer cache. For monorepos with Docker images. |
 | **Merge Build** | `reusable-merge-build.yml` | `workflow_call` | Promotes the image validated by the merged PR to the `latest`, `beta`, version, major and minor tags after verifying its revision label, and falls back to a build on mismatch. Runs no build, lint or test.                                      |
 | **Dependency Audit** | `reusable-npm-audit.yml` | `workflow_call` | Production dependency audit gate: fails on unallowlisted high/critical runtime advisories and reports dev-only advisories in the job summary. Called by PR Verify and Merge Build when `audit_enabled` is true. |
 
@@ -955,6 +955,23 @@ The image name and version come from the root `package.json`, so bump the minor 
 > **Keep PR branches up to date with the default branch before merging.** The promoted image is the one built from the PR head, so if the default branch moved in the meantime the released artifact will not contain those commits.
 
 Validated end to end on `planner-llm-agent` 0.2.0: the pull request pushed `beta-pr-2` and `beta`, the merge promoted that image in **40 seconds** with no build, and `beta-pr-2`, `beta`, `0.2.0`, `0.2`, `0` and `latest` all resolve to the single digest `sha256:710fed19…` with identical per-architecture digests.
+
+### Docker Layer Cache
+
+The PR build exports a **shared buildx registry cache** to `<dockerhub-user>/<image>:buildcache` and imports it on every run, so stable layers — distro packages, compiled dependencies and `npm ci` — are reused across pull requests and branches instead of being rebuilt from scratch (most of the cost is the QEMU-emulated `linux/arm64` build).
+
+```text
+--cache-from "type=registry,ref=<image>:buildcache"
+--cache-to   "type=registry,ref=<image>:buildcache,mode=max,image-manifest=false,ignore-error=true"
+```
+
+- **Registry backend, not `type=gha`**: the GitHub Actions cache is branch-scoped (current branch, base branch, default branch) and `main` never builds under the immutable-promotion design, so a gha cache would never warm. The registry cache is shared by every PR and branch.
+- **`mode=max`** exports intermediate builder stages (the expensive ones), not only the final image.
+- **`image-manifest=false`** stores the cache as an OCI index so both platforms' cache records share one tag.
+- **`ignore-error=true`** keeps the build green when the cache export fails (registry hiccup, quota); `--cache-from` on a not-yet-existing ref logs a failed import and continues, so the first run after adoption is a normal cold build that writes the cache.
+- A single multi-platform build can persist only one platform's cache (docker/buildx#1382). If a warm run reports `CACHED` for only one platform, switch to per-platform tags (`buildcache-amd64`, `buildcache-arm64`) with cache-export-only steps after the build — never split the image build into two sequential platform builds.
+- The merge fallback build imports the same ref read-only, so a rare fallback is not a cold build.
+- **Purge** by deleting the `buildcache` tag (Docker Hub UI or API); the next build simply runs cold. **Monitor** its size: a `mode=max` cache can reach several GB and the tag inherits the image repository's visibility (public repositories only today).
 
 ### Adopting in Your Project
 
