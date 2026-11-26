@@ -4,6 +4,29 @@ All notable changes to `@devopsplaybook.io/common-utils` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.13.0] - 2026-11-26
+
+### Added
+
+- **Docker registry layer cache** in the shared PR build workflows. The
+  multi-platform image build in `reusable-pr-verify.yml` now exports and
+  imports a shared buildx registry cache at
+  `<dockerhub-user>/<image>:buildcache` (`type=registry`, `mode=max`,
+  `image-manifest=false`, `ignore-error=true`), so distro packages,
+  compiled dependencies and `npm ci` layers are reused across pull requests
+  and branches instead of being rebuilt under QEMU on every run. The rare
+  merge fallback build in `reusable-merge-build.yml` imports the same ref
+  read-only. The registry backend is used instead of the branch-scoped GitHub
+  Actions cache because `main` never builds under the immutable-promotion
+  design.
+
+### Documentation
+
+- Documented the cache in `AGENTS.md` (ref name, `mode=max`, registry-vs-gha
+  rationale, per-platform fallback, purge, size monitoring) and in the
+  README (`Docker Layer Cache` section). No library code, export or runtime
+  behaviour changed.
+
 ## [2.12.0] - 2026-11-25
 
 ### Added

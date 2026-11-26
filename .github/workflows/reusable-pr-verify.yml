@@ -191,6 +191,12 @@ jobs:
           SERVICE_NAME=$(jq -r '.name' package.json)
           IMAGE="${DOCKER_HUB_USERNAME}/${SERVICE_NAME}"
 
+          # Shared registry cache: every PR and branch reuses the layers stored
+          # under this tag (mode=max: intermediate builder stages too). The
+          # Actions cache is branch-scoped and `main` never builds, so the
+          # registry backend is used instead. Export errors are non-fatal.
+          CACHE_REF="${IMAGE}:buildcache"
+
           # `beta-pr-<number>` is the immutable per-PR reference: it identifies
           # exactly the artifact validated by this pull request, and the merge
           # build promotes it as-is to the semantic version tags.
@@ -207,6 +213,8 @@ jobs:
           echo "Building ${IMAGE}:beta-pr-${PR_TAG} and ${IMAGE}:beta"
           docker buildx build \
             --platform "${DOCKER_PLATFORMS}" \
+            --cache-from "type=registry,ref=${CACHE_REF}" \
+            --cache-to "type=registry,ref=${CACHE_REF},mode=max,image-manifest=false,ignore-error=true" \
             --push \
             -f Dockerfile \
             --label "org.opencontainers.image.revision=${IMAGE_REVISION}" \
